@@ -1,5 +1,5 @@
 # ================================
-# Full Pi 5 Setup: Face Tracking (mediapipe via piwheels + TFLite)
+# Full Pi 5 Setup: Face Tracking
 # ================================
 
 # Update and upgrade
