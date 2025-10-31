@@ -58,7 +58,7 @@ pip install "numpy<2" "protobuf<4" pandas pyserial
 # OpenCV, TensorFlow Lite, MediaPipe (Pi wheels)
 # =========================================
 pip install opencv-python==4.8.1.78 tflite-runtime==2.14.0
-pip install --index-url https://www.piwheels.org/simple mediapipe==0.10.14
+pip install mediapipe
 
 
 
