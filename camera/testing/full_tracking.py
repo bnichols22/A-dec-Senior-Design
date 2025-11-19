@@ -55,6 +55,8 @@ AXIS_SIGN = {"yaw": +1, "pitch": -1, "roll": +1}
 TEST = 1  # 1=log only; 0=send to gimbal via libsimplebgc.so
 
 # Path to the shared library we built from SerialAPI + shim
+# TODO we need to actually move the libsimplebgc.so into this directory
+#  and validate that it functions / can grab everything it needs
 LIB_PATH  = os.path.join(BASE_DIR, 'SerialLibrary/libsimplebgc.so')
 
 DRAW = True
