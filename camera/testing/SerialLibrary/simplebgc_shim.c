@@ -1,87 +1,121 @@
-#include <string.h>
+// simplebgc_shim.c
 #include "sbgc32.h"
+#include <string.h>
 
 /*
- * Very small C shim we can call from Python.
- * It uses the same logic as the DemoLaunch example:
- * - init the device
- * - set up ControlConfig
- * - enable motors
- * - send simple angle commands on Pitch/Yaw
+ * Thin C shim to expose a small, stable API to Python via ctypes.
+ * Internally uses the official SimpleBGC SerialAPI library.
+ *
+ * Functions exported:
+ *   int bgc_init(void);
+ *   int bgc_setup_control_config(void);
+ *   int bgc_set_motors(int on);
+ *   int bgc_play_beep(void);
+ *   int bgc_control_angles(double roll_deg, double pitch_deg, double yaw_deg);
  */
 
-static sbgcGeneral_t       gSBGC;
-static sbgcControl_t       gCtrl;
-static sbgcControlConfig_t gCtrlCfg;
-static sbgcConfirm_t       gConfirm;   // we’ll mostly ignore its contents
+static sbgcGeneral_t         gSBGC;
+static sbgcControl_t         gCtrl;
+static sbgcControlConfig_t   gCtrlCfg;
+static sbgcBeeperSettings_t  gBeep;
 
-/* 0 = OK, non-zero = sbgcCommandStatus_t error code */
+/* ------------------------------------------------------------------ */
+/*                          Initialization                            */
+/* ------------------------------------------------------------------ */
+
 int bgc_init(void)
 {
-    sbgcCommandStatus_t st;
+    sbgcCommandStatus_t st = SBGC32_Init(&gSBGC);
 
-    // Initialize the library (uses Linux driver & /dev/ttyUSB0 from serialAPI_Config.h)
-    st = SBGC32_Init(&gSBGC);
     if (st != sbgcCOMMAND_OK)
         return (int)st;
 
-    // ---- Control configuration (mirrors the demo)
-    memset(&gCtrlCfg, 0, sizeof(gCtrlCfg));
+    return 0;
+}
 
+/*
+ * Configure CMD_CONTROL in ANGLE mode for ROLL / PITCH / YAW.
+ * Very similar in spirit to the official DemoLaunch example.
+ */
+int bgc_setup_control_config(void)
+{
+    memset(&gCtrlCfg, 0, sizeof(gCtrlCfg));
+    memset(&gCtrl,    0, sizeof(gCtrl));
+
+    /* Basic LPFs on angles and speeds */
+    gCtrlCfg.AxisCCtrl[ROLL].angleLPF  = 2;
     gCtrlCfg.AxisCCtrl[PITCH].angleLPF = 2;
     gCtrlCfg.AxisCCtrl[YAW].angleLPF   = 2;
 
+    gCtrlCfg.AxisCCtrl[ROLL].speedLPF  = 2;
     gCtrlCfg.AxisCCtrl[PITCH].speedLPF = 2;
     gCtrlCfg.AxisCCtrl[YAW].speedLPF   = 2;
 
+    /* Don’t require CMD_CONFIRM for control config */
     gCtrlCfg.flags = CtrlCONFIG_FLAG_NO_CONFIRM;
 
-    st = SBGC32_ControlConfig(&gSBGC, &gCtrlCfg, &gConfirm);
-    if (st != sbgcCOMMAND_OK)
-        return (int)st;
+    /* Commit the control config to the board */
+    SBGC32_ControlConfig(&gSBGC, &gCtrlCfg, SBGC_NO_CONFIRM);
 
-    // ---- Base control struct
-    memset(&gCtrl, 0, sizeof(gCtrl));
-
+    /* Set control mode: ANGLE + PRECISE target for all axes */
+    gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
 
-    gCtrl.AxisC[PITCH].angle = 0;
-    gCtrl.AxisC[YAW].angle   = 0;
+    /* Start from zero angles, with reasonable speeds */
+    gCtrl.AxisC[ROLL].angle  = sbgcAngleToDegree(0.0f);
+    gCtrl.AxisC[PITCH].angle = sbgcAngleToDegree(0.0f);
+    gCtrl.AxisC[YAW].angle   = sbgcAngleToDegree(0.0f);
 
-    // Speeds in “system units” (see docs, same as demo)
+    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(25.0f);
     gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(25.0f);
     gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(50.0f);
 
-    // ---- Turn motors ON
-    st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
-    return (int)st;
+    return 0;
 }
 
-/* Turn motors on/off: on = 1 -> ON, on = 0 -> OFF */
+/* ------------------------------------------------------------------ */
+/*                        Motors & Beeper helpers                      */
+/* ------------------------------------------------------------------ */
+
+/* on = 1 -> motors ON; on = 0 -> motors OFF */
 int bgc_set_motors(int on)
 {
-    sbgcCommandStatus_t st;
-
     if (on)
-        st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
+    {
+        /* Turn motors ON, no confirmation needed */
+        return (int)SBGC32_SetMotorsON(&gSBGC, SBGC_NO_CONFIRM);
+    }
     else
-        st = SBGC32_SetMotorsOFF(&gSBGC, 0, &gConfirm);  // 0 = default stop mode
-
-    return (int)st;
+    {
+        /* Turn motors OFF in normal mode, no confirmation needed */
+        return (int)SBGC32_SetMotorsOFF(&gSBGC, MOTOR_MODE_NORMAL, SBGC_NO_CONFIRM);
+    }
 }
 
-/* Move gimbal to given angles (degrees) on PITCH & YAW */
-int bgc_control_angles(float pitch_deg, float yaw_deg)
+/* Simple “completion” beep using the built-in beeper feature */
+int bgc_play_beep(void)
 {
-    // Library expects “system degree” units; helper macro converts from human degrees
-    gCtrl.AxisC[PITCH].angle = sbgcAngleToDegree((int16_t)pitch_deg);
-    gCtrl.AxisC[YAW].angle   = sbgcAngleToDegree((int16_t)yaw_deg);
+    memset(&gBeep, 0, sizeof(gBeep));
+    gBeep.mode = BEEP_MODE_COMPLETE;
+
+    return (int)SBGC32_PlayBeeper(&gSBGC, &gBeep, SBGC_NO_CONFIRM);
+}
+
+/* ------------------------------------------------------------------ */
+/*                        Main control function                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * roll_deg, pitch_deg, yaw_deg are ABSOLUTE target angles in degrees.
+ * You can maintain the commanded angle state on the Python side and
+ * call this whenever you want to step to a new absolute pose.
+ */
+int bgc_control_angles(double roll_deg, double pitch_deg, double yaw_deg)
+{
+    gCtrl.AxisC[ROLL].angle  = sbgcAngleToDegree((float)roll_deg);
+    gCtrl.AxisC[PITCH].angle = sbgcAngleToDegree((float)pitch_deg);
+    gCtrl.AxisC[YAW].angle   = sbgcAngleToDegree((float)yaw_deg);
 
     return (int)SBGC32_Control(&gSBGC, &gCtrl);
-}
-
-void bgc_deinit(void)
-{
-    SBGC32_Deinit(&gSBGC);
 }
