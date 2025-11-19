@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================
-# File: centroid_track.py
+# File: centroid_sender.py
 # Purpose:
 #   Moving-anchor tracker with explicit state machine:
 #   - LOCKED: box at current anchor; when centroid exits, enter SEEKING
