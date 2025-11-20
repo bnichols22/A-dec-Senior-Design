@@ -9,7 +9,7 @@
 #
 # Gimbal transport:
 #   - Uses SimpleBGC SerialAPI C library exposed via simplebgc_shim.c
-#   - Python calls bgc_control_angles(roll_deg, pitch_deg, yaw_deg)
+#   - Python calls bgc_control_angles(yaw_deg, pitch_deg, roll_deg)
 #     with ABSOLUTE angles; we manage absolute angle state here.
 # ==============================================================
 
@@ -52,12 +52,13 @@ MIN_STEP_DEG_ROLL  = 1.0
 AXIS_SIGN = {"yaw": +1, "pitch": -1, "roll": +1}
 
 # Gimbal / test control
-TEST = 1  # 1=log only; 0=send to gimbal via libsimplebgc.so
+TEST = 0  # 1=log only; 0=send to gimbal via libsimplebgc.so
 
 # Path to the shared library we built from SerialAPI + shim
-# TODO we need to actually move the libsimplebgc.so into this directory
-#  and validate that it functions / can grab everything it needs
-LIB_PATH  = os.path.join(BASE_DIR, 'SerialLibrary/libsimplebgc.so')
+# TODO: Make sure the library is at this path/moved properly
+LIB_PATH = os.path.expanduser(
+    "~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI/libsimplebgc.so"
+)
 
 DRAW = True
 SMOOTH_ALPHA = 0.25
@@ -127,6 +128,7 @@ def init_sbgc():
 
     try:
         _bgc_lib = ctypes.CDLL(LIB_PATH)
+        print(f"# Loaded SBGC library from {LIB_PATH}")
     except OSError as e:
         print(f"# ERROR loading {LIB_PATH}: {e}")
         _bgc_lib = None
@@ -137,40 +139,28 @@ def init_sbgc():
     _bgc_lib.bgc_init.argtypes = []
     _bgc_lib.bgc_init.restype  = ctypes.c_int
 
-    _bgc_lib.bgc_setup_control_config.argtypes = []
-    _bgc_lib.bgc_setup_control_config.restype  = ctypes.c_int
-
-    _bgc_lib.bgc_set_motors.argtypes = [ctypes.c_int]
-    _bgc_lib.bgc_set_motors.restype  = ctypes.c_int
-
-    _bgc_lib.bgc_play_beep.argtypes = []
-    _bgc_lib.bgc_play_beep.restype  = ctypes.c_int
-
-    # roll_deg, pitch_deg, yaw_deg
+    # bgc_control_angles(float yaw_deg, float pitch_deg, float roll_deg)
     _bgc_lib.bgc_control_angles.argtypes = [
-        ctypes.c_double, ctypes.c_double, ctypes.c_double
+        ctypes.c_float, ctypes.c_float, ctypes.c_float
     ]
     _bgc_lib.bgc_control_angles.restype = ctypes.c_int
 
-    # Initialize library
+    # optional helpers (only if you use them)
+    _bgc_lib.bgc_beep_once.restype = ctypes.c_int
+
+    _bgc_lib.bgc_get_angles.argtypes = [
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+    ]
+    _bgc_lib.bgc_get_angles.restype = ctypes.c_int
+
+    # Initialize library (also sets control config + motors ON in shim)
     rc = _bgc_lib.bgc_init()
     if rc != 0:
         print(f"# ERROR: bgc_init() returned {rc}")
         _bgc_initialized = False
         return
-
-    rc = _bgc_lib.bgc_setup_control_config()
-    if rc != 0:
-        print(f"# ERROR: bgc_setup_control_config() returned {rc}")
-        _bgc_initialized = False
-        return
-
-    # Optional: turn motors on here
-    rc = _bgc_lib.bgc_set_motors(1)
-    if rc != 0:
-        print(f"# WARN: bgc_set_motors(1) returned {rc}")
-    else:
-        print("# Motors ON via bgc_set_motors(1)")
 
     _bgc_initialized = True
     print("# SBGC initialization complete.")
@@ -197,6 +187,7 @@ def write_test_line(d_yaw, d_pitch, d_roll,
         print(f"# TEST_FILE_ERROR: {e}")
         return False
 
+# This sends to the log file or to the board
 def send_or_log_angles(d_yaw_deg, d_pitch_deg, d_roll_deg,
                        abs_yaw_deg, abs_pitch_deg, abs_roll_deg):
     """
@@ -211,11 +202,11 @@ def send_or_log_angles(d_yaw_deg, d_pitch_deg, d_roll_deg,
         print("# ERROR: SBGC shim not initialized.")
         return False
 
-    # Call shim: roll, pitch, yaw (this order matches simplebgc_shim.c)
+    # Shim order: yaw, pitch, roll 
     rc = _bgc_lib.bgc_control_angles(
-        ctypes.c_double(abs_roll_deg),
-        ctypes.c_double(abs_pitch_deg),
-        ctypes.c_double(abs_yaw_deg)
+        ctypes.c_float(abs_yaw_deg),
+        ctypes.c_float(abs_pitch_deg),
+        ctypes.c_float(abs_roll_deg),
     )
     if rc != 0:
         print(f"# SEND_ERROR: bgc_control_angles() returned {rc}")
