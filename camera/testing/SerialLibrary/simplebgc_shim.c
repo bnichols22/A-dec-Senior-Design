@@ -1,129 +1,98 @@
 // simplebgc_shim.c
-// Thin C shim around BaseCam SerialAPI for use with Python (ctypes)
+// Minimal shim wrapping BaseCam SerialAPI for use from Python via ctypes.
+//
+// This version:
+//   - Initializes ROLL, PITCH, YAW in ANGLE mode
+//   - Exposes:
+//        int  bgc_init(void);
+//        int  bgc_set_motors(int on);
+//        int  bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg);
+//        void bgc_deinit(void);
 
+#include <string.h>
 #include "sbgc32.h"
-#include <string.h>   // memset
-#include <stdio.h>    // printf (for debug)
 
-// Global SBGC object and some commonly used structs
-static sbgcGeneral_t           gSBGC;
-static sbgcControl_t           gCtrl;
-static sbgcControlConfig_t     gCtrlCfg;
-static sbgcBeeperSettings_t    gBeep;
-
-/* ------------- Utility: basic init / deinit ------------- */
+static sbgcGeneral_t       gSBGC;
+static sbgcControl_t       gCtrl;
+static sbgcControlConfig_t gCtrlCfg;
+static sbgcConfirm_t       gConfirm;
 
 int bgc_init(void)
 {
-    sbgcCommandStatus_t status;
+    sbgcCommandStatus_t st;
 
-    // Clear structures
-    memset(&gSBGC,   0, sizeof(gSBGC));
-    memset(&gCtrl,   0, sizeof(gCtrl));
-    memset(&gCtrlCfg,0, sizeof(gCtrlCfg));
-    memset(&gBeep,   0, sizeof(gBeep));
+    // Initialize main SerialAPI context
+    st = SBGC32_Init(&gSBGC);
+    if (st != sbgcCOMMAND_OK)
+        return (int)st;
 
-    // Init driver + library (see demo main.c pattern)
-    status = SBGC32_Init(&gSBGC);
-    if (status != sbgcCOMMAND_OK)
-    {
-        printf("SBGC32_Init failed: %d\n", (int)status);
-        return (int)status;
-    }
+    // -------- Control config (filters, etc.) --------
+    memset(&gCtrlCfg, 0, sizeof(gCtrlCfg));
 
-    // Configure control mode: all axes in ANGLE mode,
-    // use board profile speeds, no special flags.
-    gCtrlCfg.mode[ROLL]  = SBGC_CONTROL_MODE_ANGLE;
-    gCtrlCfg.mode[PITCH] = SBGC_CONTROL_MODE_ANGLE;
-    gCtrlCfg.mode[YAW]   = SBGC_CONTROL_MODE_ANGLE;
+    // Enable some low-pass filtering for all three axes
+    gCtrlCfg.AxisCCtrl[ROLL].angleLPF  = 2;
+    gCtrlCfg.AxisCCtrl[PITCH].angleLPF = 2;
+    gCtrlCfg.AxisCCtrl[YAW].angleLPF   = 2;
 
-    gCtrlCfg.speeds[ROLL]  = 0;
-    gCtrlCfg.speeds[PITCH] = 0;
-    gCtrlCfg.speeds[YAW]   = 0;
+    gCtrlCfg.AxisCCtrl[ROLL].speedLPF  = 2;
+    gCtrlCfg.AxisCCtrl[PITCH].speedLPF = 2;
+    gCtrlCfg.AxisCCtrl[YAW].speedLPF   = 2;
 
-    status = SBGC32_ControlConfig(&gSBGC, &gCtrlCfg, NULL);
-    if (status != sbgcCOMMAND_OK)
-    {
-        printf("SBGC32_ControlConfig failed: %d\n", (int)status);
-        return (int)status;
-    }
+    // No CMD_CONFIRM responses required
+    gCtrlCfg.flags = CtrlCONFIG_FLAG_NO_CONFIRM;
 
-    // Turn motors ON
-    status = SBGC32_SetMotorsON(&gSBGC, NULL);
-    if (status != sbgcCOMMAND_OK)
-    {
-        printf("SBGC32_SetMotorsON failed: %d\n", (int)status);
-        return (int)status;
-    }
+    st = SBGC32_ControlConfig(&gSBGC, &gCtrlCfg, &gConfirm);
+    if (st != sbgcCOMMAND_OK)
+        return (int)st;
 
-    return 0;   // success
+    // -------- Control structure (modes, speeds, initial angles) --------
+    memset(&gCtrl, 0, sizeof(gCtrl));
+
+    // Use ANGLE mode on all three axes with "precise target" flag
+    gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+    gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+    gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+
+    // Start from 0 deg on all axes
+    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(0.0f);
+    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(0.0f);
+    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(0.0f);
+
+    // Modest speeds; tune as needed
+    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(25.0f);
+    gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(25.0f);
+    gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(50.0f);
+
+    // Turn motors ON once at init
+    st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
+    return (int)st;
+}
+
+int bgc_set_motors(int on)
+{
+    sbgcCommandStatus_t st;
+
+    if (on)
+        st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
+    else
+        st = SBGC32_SetMotorsOFF(&gSBGC, 0, &gConfirm);
+
+    return (int)st;
+}
+
+// Updated: now takes roll, pitch, yaw *in degrees*.
+// Python side should call bgc_control_angles(roll_deg, pitch_deg, yaw_deg).
+int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
+{
+    // Convert degrees → internal "angle units"
+    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(roll_deg);
+    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(pitch_deg);
+    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(yaw_deg);
+
+    return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
 
 void bgc_deinit(void)
 {
-    // Turn motors OFF (normal mode) and let the library deinit
-    SBGC32_SetMotorsOFF(&gSBGC, SBGC_MM_NORMAL, NULL);
     SBGC32_Deinit(&gSBGC);
-}
-
-/* ------------- Buzzer helper ------------- */
-
-int bgc_beep_once(void)
-{
-    sbgcCommandStatus_t status;
-
-    memset(&gBeep, 0, sizeof(gBeep));
-    gBeep.beepNum   = 1;
-    gBeep.beepCnt   = 1;
-    gBeep.beepTime  = 200;   // ms
-    gBeep.silTime   = 100;   // ms
-    gBeep.mode      = SBGC_BEEP_MODE_FIXED;
-
-    status = SBGC32_PlayBeeper(&gSBGC, &gBeep, NULL);
-    return (int)status;
-}
-
-/* ------------- Core: angle control ------------- */
-/* Angles in degrees, relative commands */
-
-int bgc_control_angles(float yaw_deg, float pitch_deg, float roll_deg)
-{
-    sbgcCommandStatus_t status;
-
-    memset(&gCtrl, 0, sizeof(gCtrl));
-
-    gCtrl.mode[ROLL]  = SBGC_CONTROL_MODE_ANGLE;
-    gCtrl.mode[PITCH] = SBGC_CONTROL_MODE_ANGLE;
-    gCtrl.mode[YAW]   = SBGC_CONTROL_MODE_ANGLE;
-
-    gCtrl.angle[ROLL]  = (sbgcAngle_t)roll_deg;
-    gCtrl.angle[PITCH] = (sbgcAngle_t)pitch_deg;
-    gCtrl.angle[YAW]   = (sbgcAngle_t)yaw_deg;
-
-    // speeds = 0 => use profile
-    gCtrl.speed[ROLL]  = 0;
-    gCtrl.speed[PITCH] = 0;
-    gCtrl.speed[YAW]   = 0;
-
-    status = SBGC32_Control(&gSBGC, &gCtrl, NULL);
-    return (int)status;
-}
-
-/* ------------- Optional: get current frame angles ------------- */
-
-int bgc_get_angles(float *yaw_deg, float *pitch_deg, float *roll_deg)
-{
-    sbgcRealTimeData_t rtData;
-    sbgcCommandStatus_t status;
-
-    memset(&rtData, 0, sizeof(rtData));
-    status = SBGC32_ReadRealTimeData4(&gSBGC, &rtData, NULL);
-    if (status != sbgcCOMMAND_OK)
-        return (int)status;
-
-    if (roll_deg)  *roll_deg  = (float)rtData.frameAngle[ROLL];
-    if (pitch_deg) *pitch_deg = (float)rtData.frameAngle[PITCH];
-    if (yaw_deg)   *yaw_deg   = (float)rtData.frameAngle[YAW];
-
-    return 0;
 }
