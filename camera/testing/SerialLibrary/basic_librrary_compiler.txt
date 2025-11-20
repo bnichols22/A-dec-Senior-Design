@@ -1,7 +1,7 @@
 // These are the commands that were used to compile the shim that worked.
 // Ignore the file pathing, it needs to change to refelct the new locations of things in this repo
 
-cd ~/senior_design/serialAPI/serialAPI
+cd ~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI
 
 # Remove old build artifacts
 rm -f libsimplebgc.so sbgc32.o simplebgc_shim.o serialAPI_MakeCpp.o

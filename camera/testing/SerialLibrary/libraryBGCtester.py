@@ -106,22 +106,17 @@ def main():
     bgc_set_motors(True)
     time.sleep(1.0)
 
-    # 3) Move through a few poses (tweak angles as needed for safety)
-    #    (roll, pitch, yaw) in degrees – these are ABSOLUTE targets.
-    poses = [
-        ( 0.0,   0.0,   0.0),
-        ( 0.0, -10.0,   0.0),
-        ( 0.0, +10.0,   0.0),
-        ( 0.0,   0.0, -15.0),
-        ( 0.0,   0.0, +15.0),
-        (+5.0,   0.0,   0.0),
-        (-5.0,   0.0,   0.0),
-        ( 0.0,   0.0,   0.0),
-    ]
+    print("Moving to Y=+50, P=-25")
+    lib.bgc_control_angles(-25.0, 50.0, 0.0)
+    time.sleep(5)
 
-    for roll, pitch, yaw in poses:
-        bgc_control_angles(roll, pitch, yaw)
-        time.sleep(1.0)  # give it time to move
+    print("Moving to Y=-50, P=+25")
+    lib.bgc_control_angles(25.0, -50.0, 0.0)
+    time.sleep(5)
+
+    print("Moving to center (0,0)")
+    lib.bgc_control_angles(0.0, 0.0, 0.0)
+    time.sleep(3)
 
     # 4) Motors OFF
     bgc_set_motors(False)
