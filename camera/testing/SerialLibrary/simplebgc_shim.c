@@ -1,98 +1,110 @@
 // simplebgc_shim.c
-// Minimal shim wrapping BaseCam SerialAPI for use from Python via ctypes.
-//
-// This version:
-//   - Initializes ROLL, PITCH, YAW in ANGLE mode
-//   - Exposes:
-//        int  bgc_init(void);
-//        int  bgc_set_motors(int on);
-//        int  bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg);
-//        void bgc_deinit(void);
+// Minimal C shim around SerialAPI to control ROLL, PITCH, YAW
+// via absolute angles in degrees.
 
 #include <string.h>
 #include "sbgc32.h"
 
-static sbgcGeneral_t       gSBGC;
-static sbgcControl_t       gCtrl;
-static sbgcControlConfig_t gCtrlCfg;
-static sbgcConfirm_t       gConfirm;
+/* Global objects (mirroring demo main.c style) */
+static sbgcGeneral_t       SBGC32_Device;
+static sbgcControl_t       Control;
+static sbgcControlConfig_t ControlConfig;
+static sbgcConfirm_t       Confirm;
 
+/* ------------------------------------------------------------------
+ * bgc_init
+ *  - Initializes SerialAPI
+ *  - Sets up ControlConfig and Control for ROLL, PITCH, YAW
+ *  - Turns motors ON
+ *  Returns 0 on success, non-zero sbgcCommandStatus_t on error.
+ * ------------------------------------------------------------------ */
 int bgc_init(void)
 {
     sbgcCommandStatus_t st;
 
-    // Initialize main SerialAPI context
-    st = SBGC32_Init(&gSBGC);
+    /* Init library and driver */
+    st = SBGC32_Init(&SBGC32_Device);
     if (st != sbgcCOMMAND_OK)
         return (int)st;
 
-    // -------- Control config (filters, etc.) --------
-    memset(&gCtrlCfg, 0, sizeof(gCtrlCfg));
+    /* Clear control config and control structures */
+    memset(&ControlConfig, 0, sizeof(ControlConfig));
+    memset(&Control,       0, sizeof(Control));
 
-    // Enable some low-pass filtering for all three axes
-    gCtrlCfg.AxisCCtrl[ROLL].angleLPF  = 2;
-    gCtrlCfg.AxisCCtrl[PITCH].angleLPF = 2;
-    gCtrlCfg.AxisCCtrl[YAW].angleLPF   = 2;
+    /* Low-pass filters, similar to demo but now for all 3 axes */
+    ControlConfig.AxisCCtrl[ROLL].angleLPF  = 2;
+    ControlConfig.AxisCCtrl[PITCH].angleLPF = 2;
+    ControlConfig.AxisCCtrl[YAW].angleLPF   = 2;
 
-    gCtrlCfg.AxisCCtrl[ROLL].speedLPF  = 2;
-    gCtrlCfg.AxisCCtrl[PITCH].speedLPF = 2;
-    gCtrlCfg.AxisCCtrl[YAW].speedLPF   = 2;
+    ControlConfig.AxisCCtrl[ROLL].speedLPF  = 2;
+    ControlConfig.AxisCCtrl[PITCH].speedLPF = 2;
+    ControlConfig.AxisCCtrl[YAW].speedLPF   = 2;
 
-    // No CMD_CONFIRM responses required
-    gCtrlCfg.flags = CtrlCONFIG_FLAG_NO_CONFIRM;
+    /* No confirmation on each control command */
+    ControlConfig.flags = CtrlCONFIG_FLAG_NO_CONFIRM;
 
-    st = SBGC32_ControlConfig(&gSBGC, &gCtrlCfg, &gConfirm);
+    /* Tell board about this configuration */
+    st = SBGC32_ControlConfig(&SBGC32_Device, &ControlConfig, &Confirm);
     if (st != sbgcCOMMAND_OK)
         return (int)st;
 
-    // -------- Control structure (modes, speeds, initial angles) --------
-    memset(&gCtrl, 0, sizeof(gCtrl));
+    /* Enable ANGLE mode on ALL THREE axes, with precise targeting */
+    Control.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+    Control.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+    Control.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
 
-    // Use ANGLE mode on all three axes with "precise target" flag
-    gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
-    gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
-    gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+    /* Start at 0° on all axes */
+    Control.AxisC[ROLL].angle  = sbgcAngleToDegree(0.0f);
+    Control.AxisC[PITCH].angle = sbgcAngleToDegree(0.0f);
+    Control.AxisC[YAW].angle   = sbgcAngleToDegree(0.0f);
 
-    // Start from 0 deg on all axes
-    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(0.0f);
-    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(0.0f);
-    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(0.0f);
+    /* Reasonable speeds (deg/s → internal units) */
+    Control.AxisC[ROLL].speed  = sbgcSpeedToValue(25.0f);
+    Control.AxisC[PITCH].speed = sbgcSpeedToValue(25.0f);
+    Control.AxisC[YAW].speed   = sbgcSpeedToValue(50.0f);
 
-    // Modest speeds; tune as needed
-    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(25.0f);
-    gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(25.0f);
-    gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(50.0f);
-
-    // Turn motors ON once at init
-    st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
+    /* Turn motors ON */
+    st = SBGC32_SetMotorsON(&SBGC32_Device, &Confirm);
     return (int)st;
 }
 
+/* ------------------------------------------------------------------
+ * bgc_set_motors
+ *  on = 1 → motors ON
+ *  on = 0 → motors OFF
+ * ------------------------------------------------------------------ */
 int bgc_set_motors(int on)
 {
     sbgcCommandStatus_t st;
 
     if (on)
-        st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
+        st = SBGC32_SetMotorsON(&SBGC32_Device, &Confirm);
     else
-        st = SBGC32_SetMotorsOFF(&gSBGC, 0, &gConfirm);
+        st = SBGC32_SetMotorsOFF(&SBGC32_Device, 0, &Confirm);
 
     return (int)st;
 }
 
-// Updated: now takes roll, pitch, yaw *in degrees*.
-// Python side should call bgc_control_angles(roll_deg, pitch_deg, yaw_deg).
+/* ------------------------------------------------------------------
+ * bgc_control_angles
+ *  roll_deg, pitch_deg, yaw_deg are ABSOLUTE target angles in degrees.
+ *  We convert to internal units exactly like the demo does:
+ *      Control.AxisC[*].angle = sbgcAngleToDegree(deg);
+ * ------------------------------------------------------------------ */
 int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
 {
-    // Convert degrees → internal "angle units"
-    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(roll_deg);
-    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(pitch_deg);
-    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(yaw_deg);
+    /* Convert degrees → internal angle units, as in DemoControl() */
+    Control.AxisC[ROLL].angle  = sbgcAngleToDegree(roll_deg);
+    Control.AxisC[PITCH].angle = sbgcAngleToDegree(pitch_deg);
+    Control.AxisC[YAW].angle   = sbgcAngleToDegree(yaw_deg);
 
-    return (int)SBGC32_Control(&gSBGC, &gCtrl);
+    return (int)SBGC32_Control(&SBGC32_Device, &Control);
 }
 
+/* ------------------------------------------------------------------
+ * bgc_deinit
+ * ------------------------------------------------------------------ */
 void bgc_deinit(void)
 {
-    SBGC32_Deinit(&gSBGC);
+    SBGC32_Deinit(&SBGC32_Device);
 }
