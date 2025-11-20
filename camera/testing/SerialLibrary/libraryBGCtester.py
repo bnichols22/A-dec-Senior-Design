@@ -106,17 +106,15 @@ def main():
     bgc_set_motors(True)
     time.sleep(1.0)
 
-    print("Moving to Y=+50, P=-25")
-    lib.bgc_control_angles(-25.0, 50.0, 0.0)
-    time.sleep(5)
+    # Example: 10° roll, -5° pitch, +20° yaw
+    rc = lib.bgc_control_angles(ctypes.c_float(10.0),ctypes.c_float(-5.0), ctypes.c_float(20.0))
+    time.sleep(5.0)
 
-    print("Moving to Y=-50, P=+25")
-    lib.bgc_control_angles(25.0, -50.0, 0.0)
-    time.sleep(5)
+    rc = lib.bgc_control_angles(ctypes.c_float(0.0),ctypes.c_float(0.0), ctypes.c_float(0.0))
+    time.sleep(5.0)
 
-    print("Moving to center (0,0)")
-    lib.bgc_control_angles(0.0, 0.0, 0.0)
-    time.sleep(3)
+    rc = lib.bgc_control_angles(ctypes.c_float(0.0),ctypes.c_float(0.0), ctypes.c_float(0.0))
+    time.sleep(5.0)
 
     # 4) Motors OFF
     bgc_set_motors(False)
