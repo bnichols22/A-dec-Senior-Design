@@ -1,0 +1,16 @@
+// These are the commands that were used to compile the shim that worked.
+// Ignore the file pathing, it needs to change to refelct the new locations of things in this repo
+
+cd ~/senior_design/serialAPI/serialAPI
+
+# Remove old build artifacts
+rm -f libsimplebgc.so sbgc32.o simplebgc_shim.o serialAPI_MakeCpp.o
+
+# Compile ALL SerialAPI sources through sbgc32.c (thanks to SBGC_NEED_SOURCES_MAKE = ON)
+gcc -fPIC -c sbgc32.c -o sbgc32.o
+
+# Compile the shim
+gcc -fPIC -c simplebgc_shim.c -o simplebgc_shim.o
+
+# Link into a shared library
+gcc -shared -o libsimplebgc.so sbgc32.o simplebgc_shim.o -lpthread
