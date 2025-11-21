@@ -9,8 +9,11 @@
 #
 # Gimbal transport:
 #   - Uses SimpleBGC SerialAPI C library exposed via simplebgc_shim.c
-#   - Python calls bgc_control_angles(yaw_deg, pitch_deg, roll_deg)
-#     with ABSOLUTE angles; we manage absolute angle state here.
+#   - Python works in ZERO-BASED ABSOLUTE angles:
+#       * At startup, we read the current board angles and call that (0,0,0)
+#       * We keep cmd_roll/pitch/yaw in this zero-based frame
+#       * Before sending, we add the startup baseline back in so the board
+#         gets its own absolute angles.
 # ==============================================================
 
 import os, sys, time, math, warnings, statistics, ctypes
@@ -55,7 +58,6 @@ AXIS_SIGN = {"yaw": +1, "pitch": -1, "roll": +1}
 TEST = 0  # 1=log only; 0=send to gimbal via libsimplebgc.so
 
 # Path to the shared library we built from SerialAPI + shim
-# TODO: Make sure the library is at this path/moved properly
 LIB_PATH = os.path.expanduser(
     "~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI/libsimplebgc.so"
 )
@@ -111,19 +113,30 @@ class TimedHist:
             self.buf.popleft()
 
 # ----------------------------------------------------------------------
-# SBGC shim bindings (ctypes)
+# SBGC shim bindings (ctypes) + zero-based baseline
 # ----------------------------------------------------------------------
 _bgc_lib = None
 _bgc_initialized = False
 
+# NEW: baseline angles at startup (board frame)
+_baseline_yaw_deg   = 0.0
+_baseline_pitch_deg = 0.0
+_baseline_roll_deg  = 0.0
+_baseline_set       = False
+
 def init_sbgc():
-    """Load libsimplebgc.so, set prototypes, and init board."""
+    """Load libsimplebgc.so, set prototypes, init board, and capture baseline."""
     global _bgc_lib, _bgc_initialized
+    global _baseline_yaw_deg, _baseline_pitch_deg, _baseline_roll_deg, _baseline_set
 
     if TEST == 1:
         print("# TEST mode: not loading SBGC library.")
         _bgc_lib = None
         _bgc_initialized = False
+        _baseline_yaw_deg = 0.0
+        _baseline_pitch_deg = 0.0
+        _baseline_roll_deg = 0.0
+        _baseline_set = True
         return
 
     try:
@@ -145,31 +158,82 @@ def init_sbgc():
     ]
     _bgc_lib.bgc_control_angles.restype = ctypes.c_int
 
-    # optional helpers (only if you use them)
-    _bgc_lib.bgc_beep_once.restype = ctypes.c_int
+    # Optional helpers from shim
+    # int bgc_beep_once(void);
+    try:
+        _bgc_lib.bgc_beep_once.argtypes = []
+        _bgc_lib.bgc_beep_once.restype  = ctypes.c_int
+    except AttributeError:
+        pass  # not fatal if not present
 
-    _bgc_lib.bgc_get_angles.argtypes = [
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.POINTER(ctypes.c_float),
-    ]
-    _bgc_lib.bgc_get_angles.restype = ctypes.c_int
+    # int bgc_get_angles(float *yaw_deg, float *pitch_deg, float *roll_deg);
+    try:
+        _bgc_lib.bgc_get_angles.argtypes = [
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        _bgc_lib.bgc_get_angles.restype = ctypes.c_int
+    except AttributeError:
+        _bgc_lib.bgc_get_angles = None
 
-    # Initialize library (also sets control config + motors ON in shim)
+    # Initialize library (sets control config + motors ON inside shim)
     rc = _bgc_lib.bgc_init()
     if rc != 0:
         print(f"# ERROR: bgc_init() returned {rc}")
         _bgc_initialized = False
         return
 
+    # NEW: capture baseline board angles at startup
+    if hasattr(_bgc_lib, "bgc_get_angles") and _bgc_lib.bgc_get_angles is not None:
+        yaw = ctypes.c_float()
+        pitch = ctypes.c_float()
+        roll = ctypes.c_float()
+        rc2 = _bgc_lib.bgc_get_angles(
+            ctypes.byref(yaw),
+            ctypes.byref(pitch),
+            ctypes.byref(roll),
+        )
+        if rc2 == 0:
+            _baseline_yaw_deg   = float(yaw.value)
+            _baseline_pitch_deg = float(pitch.value)
+            _baseline_roll_deg  = float(roll.value)
+            _baseline_set       = True
+            print(f"# Baseline angles captured from board:")
+            print(f"#   yaw={_baseline_yaw_deg:.2f}, "
+                  f"pitch={_baseline_pitch_deg:.2f}, "
+                  f"roll={_baseline_roll_deg:.2f}")
+        else:
+            print(f"# WARN: bgc_get_angles() returned {rc2}, "
+                  f"using baseline = 0,0,0")
+            _baseline_yaw_deg = 0.0
+            _baseline_pitch_deg = 0.0
+            _baseline_roll_deg = 0.0
+            _baseline_set = True
+    else:
+        print("# WARN: bgc_get_angles not available in shim; "
+              "using baseline = 0,0,0")
+        _baseline_yaw_deg = 0.0
+        _baseline_pitch_deg = 0.0
+        _baseline_roll_deg = 0.0
+        _baseline_set = True
+
+    # Optional: audible beep to signal ready
+    if hasattr(_bgc_lib, "bgc_beep_once"):
+        try:
+            _bgc_lib.bgc_beep_once()
+        except Exception:
+            pass
+
     _bgc_initialized = True
-    print("# SBGC initialization complete.")
+    print("# SBGC initialization complete (zero-based frame set).")
 
 # ----------------------------------------------------------------------
 # Output: send or write to file (angles, not raw packets)
 # ----------------------------------------------------------------------
 def write_test_line(d_yaw, d_pitch, d_roll,
-                    abs_yaw, abs_pitch, abs_roll):
+                    abs_yaw, abs_pitch, abs_roll,
+                    board_yaw, board_pitch, board_roll):
     """
     Log attempted commands to TEST_LOG instead of moving gimbal.
     """
@@ -178,7 +242,8 @@ def write_test_line(d_yaw, d_pitch, d_roll,
             f.write(
                 f"T={time.time():.3f} "
                 f"dR={d_roll:+.2f} dP={d_pitch:+.2f} dY={d_yaw:+.2f} | "
-                f"absR={abs_roll:+.2f} absP={abs_pitch:+.2f} absY={abs_yaw:+.2f}\n"
+                f"absR={abs_roll:+.2f} absP={abs_pitch:+.2f} absY={abs_yaw:+.2f} | "
+                f"boardR={board_roll:+.2f} boardP={board_pitch:+.2f} boardY={board_yaw:+.2f}\n"
             )
             f.flush()
             os.fsync(f.fileno())
@@ -187,26 +252,35 @@ def write_test_line(d_yaw, d_pitch, d_roll,
         print(f"# TEST_FILE_ERROR: {e}")
         return False
 
-# This sends to the log file or to the board
 def send_or_log_angles(d_yaw_deg, d_pitch_deg, d_roll_deg,
                        abs_yaw_deg, abs_pitch_deg, abs_roll_deg):
     """
     If TEST=1: only log to file.
-    If TEST=0: send absolute angles via bgc_control_angles().
+    If TEST=0: send angles to gimbal via bgc_control_angles(),
+               using zero-based software frame:
+                   board_angle = baseline_angle + abs_angle
     """
+    global _baseline_yaw_deg, _baseline_pitch_deg, _baseline_roll_deg
+
+    # Compute board-frame absolute angles by adding baseline
+    board_yaw   = _baseline_yaw_deg   + abs_yaw_deg
+    board_pitch = _baseline_pitch_deg + abs_pitch_deg
+    board_roll  = _baseline_roll_deg  + abs_roll_deg
+
     if TEST == 1:
         return write_test_line(d_yaw_deg, d_pitch_deg, d_roll_deg,
-                               abs_yaw_deg, abs_pitch_deg, abs_roll_deg)
+                               abs_yaw_deg, abs_pitch_deg, abs_roll_deg,
+                               board_yaw, board_pitch, board_roll)
 
     if _bgc_lib is None or not _bgc_initialized:
         print("# ERROR: SBGC shim not initialized.")
         return False
 
-    # Shim order: yaw, pitch, roll 
+    # Shim order: yaw, pitch, roll
     rc = _bgc_lib.bgc_control_angles(
-        ctypes.c_float(abs_yaw_deg),
-        ctypes.c_float(abs_pitch_deg),
-        ctypes.c_float(abs_roll_deg),
+        ctypes.c_float(board_yaw),
+        ctypes.c_float(board_pitch),
+        ctypes.c_float(board_roll),
     )
     if rc != 0:
         print(f"# SEND_ERROR: bgc_control_angles() returned {rc}")
@@ -240,7 +314,7 @@ def main():
     last_send_time = 0.0
     lost = 0
 
-    # Absolute commanded angles
+    # Zero-based absolute commanded angles (software frame)
     cmd_roll_deg  = 0.0
     cmd_pitch_deg = 0.0
     cmd_yaw_deg   = 0.0
@@ -256,7 +330,7 @@ def main():
     # Clear the test file at the start of every run
     try:
         with open(TEST_LOG, "w") as f:
-            f.write("# SimpleBGC commands (TEST mode) — fresh run\n")
+            f.write("# SimpleBGC commands (TEST/zero-based) — fresh run\n")
             f.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         print(f"# Cleared {TEST_LOG} for a new session.")
     except Exception as e:
@@ -395,7 +469,7 @@ def main():
                 if abs(d_roll)  < MIN_STEP_DEG_ROLL:  d_roll = 0.0
 
                 if (d_yaw != 0.0) or (d_pitch != 0.0) or (d_roll != 0.0):
-                    # Update absolute commanded angles
+                    # Update zero-based cmd angles
                     cmd_yaw_deg   += d_yaw
                     cmd_pitch_deg += d_pitch
                     cmd_roll_deg  += d_roll
