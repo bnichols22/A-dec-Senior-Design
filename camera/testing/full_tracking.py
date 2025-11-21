@@ -33,7 +33,7 @@ print(f"# ADEC TEST_LOG = {TEST_LOG}")
 
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
-FOV_H_DEG = 95.0
+FOV_H_DEG = 75.0
 FOV_V_DEG = 60.0
 
 # Stable box: fraction of HALF-frame sizes
@@ -52,7 +52,7 @@ MIN_STEP_DEG_PITCH = 0.5
 MIN_STEP_DEG_ROLL  = 1.0
 
 # Sign convention to match gimbal axes (tune as needed)
-AXIS_SIGN = {"yaw": +1, "pitch": -1, "roll": +1}
+AXIS_SIGN = {"yaw": -1, "pitch": +1, "roll": -1}
 
 # Gimbal / test control
 TEST = 0  # 1=log only; 0=send to gimbal via libsimplebgc.so
@@ -278,9 +278,9 @@ def send_or_log_angles(d_yaw_deg, d_pitch_deg, d_roll_deg,
 
     # Shim order: yaw, pitch, roll
     rc = _bgc_lib.bgc_control_angles(
-        ctypes.c_float(board_yaw),
-        ctypes.c_float(board_pitch),
         ctypes.c_float(board_roll),
+        ctypes.c_float(board_pitch),
+        ctypes.c_float(board_yaw),
     )
     if rc != 0:
         print(f"# SEND_ERROR: bgc_control_angles() returned {rc}")

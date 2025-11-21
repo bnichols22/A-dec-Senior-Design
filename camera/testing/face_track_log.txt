@@ -1,10 +1,6 @@
 Traceback (most recent call last):
-  File "/home/ohansen22/senior_design/A-dec-Senior-Design/camera/testing/centroid_sender.py", line 406, in <module>
+  File "/home/ohansen22/senior_design/A-dec-Senior-Design/camera/testing/full_tracking.py", line 526, in <module>
     main()
-  File "/home/ohansen22/senior_design/A-dec-Senior-Design/camera/testing/centroid_sender.py", line 243, in main
-    res = face_mesh.process(rgb)
-  File "/home/ohansen22/senior_design/venv310/lib/python3.10/site-packages/mediapipe/python/solutions/face_mesh.py", line 125, in process
-    return super().process(input_data={'image': image})
-  File "/home/ohansen22/senior_design/venv310/lib/python3.10/site-packages/mediapipe/python/solution_base.py", line 340, in process
-    self._graph.wait_until_idle()
+  File "/home/ohansen22/senior_design/A-dec-Senior-Design/camera/testing/full_tracking.py", line 342, in main
+    ok, frame = cap.read()
 KeyboardInterrupt
