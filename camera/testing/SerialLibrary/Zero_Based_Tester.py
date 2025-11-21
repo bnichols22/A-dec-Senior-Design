@@ -184,9 +184,9 @@ def main():
     bgc_control_angles_relative(-15.0, 0.0, 0.0)
     time.sleep(3.0)
     
-    bgc_control_angles_relative(-40.0, 0.0, 0.0)
+    bgc_control_angles_relative(-15.0, 0.0, 0.0)
     time.sleep(3.0)
-    bgc_control_angles_relative(+40.0, 0.0, 0.0)
+    bgc_control_angles_relative(+15.0, 0.0, 0.0)
     time.sleep(3.0)
 
     print("# ------------------------------------------------------------------")
