@@ -52,7 +52,7 @@ MIN_STEP_DEG_PITCH = 0.5
 MIN_STEP_DEG_ROLL  = 1.0
 
 # Sign convention to match gimbal axes (tune as needed)
-AXIS_SIGN = {"yaw": -1, "pitch": +1, "roll": -1}
+AXIS_SIGN = {"yaw": 1, "pitch": 1, "roll": 1}
 
 # Gimbal / test control
 TEST = 0  # 1=log only; 0=send to gimbal via libsimplebgc.so
