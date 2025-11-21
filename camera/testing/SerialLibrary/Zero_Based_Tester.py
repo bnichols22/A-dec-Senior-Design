@@ -169,6 +169,12 @@ def main():
     time.sleep(3.0)
     bgc_control_angles_relative(0.0, 0.0, -20.0)
     time.sleep(3.0)
+    
+    bgc_control_angles_relative(0.0, 0.0, -60.0)
+    time.sleep(3.0)
+    bgc_control_angles_relative(0.0, 0.0, 60.0)
+    time.sleep(3.0)
+    
 
     print("# ------------------------------------------------------------------")
     print("# TEST 2: Roll +15 then -15")
@@ -177,6 +183,11 @@ def main():
     time.sleep(3.0)
     bgc_control_angles_relative(-15.0, 0.0, 0.0)
     time.sleep(3.0)
+    
+    bgc_control_angles_relative(-40.0, 0.0, 0.0)
+    time.sleep(3.0)
+    bgc_control_angles_relative(+40.0, 0.0, 0.0)
+    time.sleep(3.0)
 
     print("# ------------------------------------------------------------------")
     print("# TEST 3: Pitch -10 then +10")
@@ -184,6 +195,25 @@ def main():
     bgc_control_angles_relative(0.0, -10.0, 0.0)
     time.sleep(3.0)
     bgc_control_angles_relative(0.0, +10.0, 0.0)
+    time.sleep(3.0)
+    
+    bgc_control_angles_relative(0.0, +35.0, 0.0)
+    time.sleep(3.0)
+    bgc_control_angles_relative(0.0, -35.0, 0.0)
+    time.sleep(3.0)
+    
+    print("# ------------------------------------------------------------------")
+    print("# TEST 4: All Axis")
+    print("# ------------------------------------------------------------------")
+    
+    bgc_control_angles_relative(25.0, -35.0, -50.0)
+    time.sleep(3.0)
+    bgc_control_angles_relative(-25.0, +35.0, +50.0)
+    time.sleep(3.0)
+    
+    bgc_control_angles_relative(-30.0, +28.0, +70.0)
+    time.sleep(3.0)
+    bgc_control_angles_relative(+30.0, -28.0, -70.0)
     time.sleep(3.0)
 
     # 4) Motors OFF
