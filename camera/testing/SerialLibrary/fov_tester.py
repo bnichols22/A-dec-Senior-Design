@@ -68,7 +68,7 @@ def main():
 
     # 2) Turn motors ON
     bgc_set_motors(True)
-    time.sleep(1.0)
+    time.sleep(4.0)
 
     # 3) Open camera
     cap = cv2.VideoCapture(CAM_INDEX)
