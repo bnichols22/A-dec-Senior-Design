@@ -33,8 +33,8 @@ print(f"# ADEC TEST_LOG = {TEST_LOG}")
 
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
-FOV_H_DEG = 100.0
-FOV_V_DEG = 62.0
+FOV_H_DEG = 65.0
+FOV_V_DEG = 48.75
 
 # Stable box: fraction of HALF-frame sizes
 STABLE_SCALAR   = 0.06    # tighten to 0.05 or 0.04 if too tolerant
