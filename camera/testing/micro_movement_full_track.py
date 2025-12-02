@@ -2,21 +2,22 @@
 # ==============================================================
 # File: full_tracking.py
 # Purpose:
-#   Center-locked tracker with micro-step control:
-#   - LOCKED: stable box is fixed at the center of the frame; as long as
-#             the mouth centroid stays inside, do nothing.
-#   - SEEKING: while centroid is outside the center stable box, compute the
-#              full offset (center -> current centroid), but send only a
-#              FRACTION of that as a micro-step. Keep doing this until the
-#              centroid is back inside the box, then return to LOCKED.
+#   Fixed-center tracker with micro-step control:
+#   - The "anchor" is always the center of the frame.
+#   - A green stable box is drawn around the center.
+#   - As long as the mouth centroid is inside the box, we do nothing.
+#   - When the centroid exits the box, we:
+#       * Compute the full offset (center -> current centroid)
+#       * Send only a FRACTION of that as a micro-step
+#       * Repeat while outside the box, until the centroid returns inside.
 #
 # Gimbal transport:
 #   - Uses SimpleBGC SerialAPI C library exposed via simplebgc_shim.c
 #   - Python works in ZERO-BASED ABSOLUTE angles:
 #       * At startup, we read the current board angles and call that (0,0,0)
 #       * We keep cmd_roll/pitch/yaw in this zero-based frame
-#       * Before sending, we add the startup baseline back in so the board
-#         gets its own absolute angles.
+#       * Before sending, we add the startup baseline back so the board
+#         receives its own absolute angles.
 # ==============================================================
 
 import os, sys, time, math, warnings, statistics, ctypes
@@ -24,7 +25,7 @@ import cv2
 import mediapipe as mp
 from collections import deque
 
-# --------- Paths: force to your repo folder ----------
+# --------- Paths ----------
 BASE_DIR = os.path.expanduser('~/senior_design/A-dec-Senior-Design/camera/testing')
 os.makedirs(BASE_DIR, exist_ok=True)
 
@@ -37,25 +38,24 @@ print(f"# ADEC TEST_LOG = {TEST_LOG}")
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
 
-# Current best-guess FOV values (can keep tuning them)
+# FOV estimates (can still be tuned; micro-steps make you less sensitive)
 FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
-# Stable box: fraction of HALF-frame sizes (now centered at image center)
-STABLE_SCALAR   = 0.06
+# Stable box: fraction of HALF-frame sizes
+STABLE_SCALAR   = 0.06    # tighten to 0.05 or 0.04 if too tolerant
 WINDOW_SEC      = 0.6     # history window for stability metrics
 
-# Stability gates (used in SEEKING — only send steps when motion isn't crazy)
+# Stability gates (used while SEEKING)
 VEL_THRESH_DEG_S  = 2.5   # median angular speed threshold
 POS_STD_THRESH_PX = 2.5   # positional stddev threshold
 
-# Micro-step control:
-# We move only this fraction of the *full* offset per command.
-STEP_FRACTION = 0.3       # 30% of the distance per step (tune 0.1–0.4)
+# Micro-step control
+STEP_FRACTION = 0.2       # 20% of the full offset per step (try 0.1–0.3)
 
 # Send gating
-SEND_TIME_LIMITER = 0.18  # min seconds between sends (rate limit; smooth-ish micro-steps)
-MIN_STEP_DEG_YAW   = 0.3  # ignore tiny commands
+SEND_TIME_LIMITER = 0.25  # min seconds between sends
+MIN_STEP_DEG_YAW   = 0.3
 MIN_STEP_DEG_PITCH = 0.3
 MIN_STEP_DEG_ROLL  = 1.0
 
@@ -63,7 +63,7 @@ MIN_STEP_DEG_ROLL  = 1.0
 AXIS_SIGN = {"yaw": 1, "pitch": 1, "roll": 1}
 
 # Gimbal / test control
-TEST = 0  # 1=log only; 0=send to gimbal via libsimplebgc.so
+TEST = 0  # 1 = log only; 0 = send to gimbal via libsimplebgc.so
 
 # Path to the shared library we built from SerialAPI + shim
 LIB_PATH = os.path.expanduser(
@@ -93,9 +93,8 @@ def pixels_to_deg(dx_px, dy_px, w, h, fov_h, fov_v):
 def angle_deg(p1, p2):
     return math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
 
-def build_stable_box(center_xy, w, h, scalar):
-    """Build a box around a chosen center (here: always image center)."""
-    cx, cy = center_xy
+def build_stable_box(anchor_xy, w, h, scalar):
+    cx, cy = anchor_xy
     half_w = scalar * (w/2.0)
     half_h = scalar * (h/2.0)
     return (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
@@ -172,7 +171,7 @@ def init_sbgc():
         _bgc_lib.bgc_beep_once.argtypes = []
         _bgc_lib.bgc_beep_once.restype  = ctypes.c_int
     except AttributeError:
-        pass  # not fatal
+        pass
 
     try:
         _bgc_lib.bgc_get_angles.argtypes = [
@@ -206,7 +205,7 @@ def init_sbgc():
             _baseline_pitch_deg = float(pitch.value)
             _baseline_roll_deg  = float(roll.value)
             _baseline_set       = True
-            print(f"# Baseline angles captured from board:")
+            print("# Baseline angles captured from board:")
             print(f"#   yaw={_baseline_yaw_deg:.2f}, "
                   f"pitch={_baseline_pitch_deg:.2f}, "
                   f"roll={_baseline_roll_deg:.2f}")
@@ -223,7 +222,7 @@ def init_sbgc():
         _baseline_roll_deg = 0.0
         _baseline_set = True
 
-    # Optional: audible beep to signal ready
+    # Optional beep
     if hasattr(_bgc_lib, "bgc_beep_once"):
         try:
             _bgc_lib.bgc_beep_once()
@@ -295,7 +294,6 @@ def send_or_log_angles(d_yaw_deg, d_pitch_deg, d_roll_deg,
 
 # ---------------- Main loop (stateful) ----------------
 def main():
-    # Init SBGC library & motors if not in TEST mode
     init_sbgc()
 
     mp_face_mesh = mp.solutions.face_mesh
@@ -317,13 +315,13 @@ def main():
     last_send_time = 0.0
     lost = 0
 
+    # Roll reference (we store the roll when face is centered)
+    roll_anchor_deg = None
+
     # Zero-based absolute commanded angles (software frame)
     cmd_roll_deg  = 0.0
     cmd_pitch_deg = 0.0
     cmd_yaw_deg   = 0.0
-
-    # Optional: roll target (keeps roll near initial center orientation)
-    roll_target_deg = None
 
     LOCKED, SEEKING = 0, 1
     state = LOCKED
@@ -335,13 +333,13 @@ def main():
     # Clear the test file at the start of every run
     try:
         with open(TEST_LOG, "w") as f:
-            f.write("# SimpleBGC commands (TEST/zero-based, center-locked micro-steps) — fresh run\n")
+            f.write("# SimpleBGC commands (TEST/zero-based, micro-steps, center-anchored) — fresh run\n")
             f.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         print(f"# Cleared {TEST_LOG} for a new session.")
     except Exception as e:
         print(f"# ERROR clearing test log: {e}")
 
-    print("# T roll pitch yaw can_send state (prospective during SEEKING; actual on SEND)")
+    print("# T roll pitch yaw state")
 
     while True:
         ok, frame = cap.read()
@@ -351,10 +349,9 @@ def main():
         now = time.time()
         h, w = frame.shape[:2]
 
-        # Define the "ideal" center point for the mouth + light axis
-        center_x = w / 2.0
-        center_y = h / 2.0
-        center_pt = (center_x, center_y)
+        # Fixed anchor at center of frame
+        center_anchor = (w / 2.0, h / 2.0)
+        box = build_stable_box(center_anchor, w, h, STABLE_SCALAR)
 
         # --- detect mouth centroid + roll
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -384,10 +381,11 @@ def main():
             if lost > MAX_LOST_FRAMES:
                 prev_smoothed = None
                 prev_time = None
+                roll_anchor_deg = None
             T = now - t0
-            print(f"{T:.3f} +0.000 +0.000 +0.000 0 {state}")
+            print(f"{T:.3f} +0.000 +0.000 +0.000 {state}")
             if DRAW:
-                cv2.imshow("Centroid Tracker (center-locked)", frame)
+                cv2.imshow("Centroid Tracker (center-anchored)", frame)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
             continue
@@ -396,20 +394,14 @@ def main():
         # Smooth centroid
         smoothed = ema_point(centroid, prev_smoothed, SMOOTH_ALPHA)
 
-        # Initialize timing
+        # Init timing
         if prev_time is None:
             prev_time = now
 
-        # Build central LOCKED box (always around image center)
-        box = build_stable_box(center_pt, w, h, STABLE_SCALAR)
+        # Is centroid inside the center box?
         inside = inside_box(smoothed, box)
 
-        # If we don't have a roll target yet, set it when we first see a face
-        # inside the box (i.e., "good" starting orientation).
-        if inside and roll_now_deg is not None and roll_target_deg is None:
-            roll_target_deg = roll_now_deg
-
-        # Compute dt-based velocity for stability
+        # Compute dt-based velocity for stability metrics
         dt = max(1e-6, now - prev_time)
         if prev_smoothed is None:
             speed = 0.0
@@ -421,25 +413,27 @@ def main():
         prev_time = now
         prev_smoothed = smoothed
 
-        # Default console outputs (prospective values)
+        # Default console outputs
         d_yaw = d_pitch = d_roll = 0.0
-        can_send_flag = 0
         sent_this_frame = False
 
-        # ---------- STATE MACHINE ----------
-        if state == LOCKED:
-            if not inside:
-                # We just left the center stable region -> start SEEKING
-                state = SEEKING
-                pos_x.clear()
-                pos_y.clear()
-                vel_h.clear()
-        else:  # SEEKING
-            # Update histories for stability metrics
+        # Update histories
+        if inside:
+            state = LOCKED
+            pos_x.clear()
+            pos_y.clear()
+            vel_h.clear()
+            # When centered, refresh our roll reference
+            if roll_now_deg is not None:
+                roll_anchor_deg = roll_now_deg
+        else:
+            state = SEEKING
             pos_x.add(now, smoothed[0])
             pos_y.add(now, smoothed[1])
             vel_h.add(now, speed)
 
+        # Only compute moves when SEEKING
+        if state == SEEKING:
             xs, ys = pos_x.values(), pos_y.values()
             pos_std = 999.0
             if len(xs) >= 6 and len(ys) >= 6:
@@ -448,73 +442,70 @@ def main():
             vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
             is_stable_here = (vel_med < VEL_THRESH_DEG_S) and (pos_std < POS_STD_THRESH_PX)
 
-            # If we've successfully moved the face back inside the center box,
-            # we're done: go back to LOCKED.
-            if inside:
-                if roll_now_deg is not None:
-                    roll_target_deg = roll_now_deg if roll_target_deg is None else roll_target_deg
-                pos_x.clear()
-                pos_y.clear()
-                vel_h.clear()
-                state = LOCKED
-            else:
-                # Compute full desired offsets (center -> current)
-                dx_px = smoothed[0] - center_x
-                dy_px = smoothed[1] - center_y
-                full_d_yaw, full_d_pitch = pixels_to_deg(dx_px, dy_px, w, h, FOV_H_DEG, FOV_V_DEG)
+            # Full desired offset from center -> smoothed
+            dx_px = smoothed[0] - center_anchor[0]
+            dy_px = smoothed[1] - center_anchor[1]
+            full_d_yaw, full_d_pitch = pixels_to_deg(dx_px, dy_px, w, h, FOV_H_DEG, FOV_V_DEG)
 
-                # Roll offset from target roll (if we have one)
-                d_roll_full = 0.0
-                if roll_now_deg is not None and roll_target_deg is not None:
-                    d_roll_full = roll_now_deg - roll_target_deg
+            # Roll offset relative to roll when centered
+            d_roll_full = 0.0
+            if roll_now_deg is not None and roll_anchor_deg is not None:
+                d_roll_full = roll_now_deg - roll_anchor_deg
 
-                # Apply axis signs
-                full_d_yaw   = AXIS_SIGN["yaw"]   * full_d_yaw
-                full_d_pitch = AXIS_SIGN["pitch"] * full_d_pitch
-                d_roll_full  = AXIS_SIGN["roll"]  * d_roll_full
+            # Apply axis signs
+            full_d_yaw   = AXIS_SIGN["yaw"]   * full_d_yaw
+            full_d_pitch = AXIS_SIGN["pitch"] * full_d_pitch
+            d_roll_full  = AXIS_SIGN["roll"]  * d_roll_full
 
-                # We only send micro-steps when motion is not crazy
-                can_time = (now - last_send_time) >= SEND_TIME_LIMITER
-                if is_stable_here and can_time:
-                    # Take a fraction of the full offset as a micro-step
-                    d_yaw   = full_d_yaw   * STEP_FRACTION
-                    d_pitch = full_d_pitch * STEP_FRACTION
-                    d_roll  = d_roll_full  * STEP_FRACTION
+            can_time = (now - last_send_time) >= SEND_TIME_LIMITER
 
-                    # Enforce minimum movement thresholds
-                    if abs(d_yaw)   < MIN_STEP_DEG_YAW:   d_yaw = 0.0
-                    if abs(d_pitch) < MIN_STEP_DEG_PITCH: d_pitch = 0.0
-                    if abs(d_roll)  < MIN_STEP_DEG_ROLL:  d_roll = 0.0
+            if is_stable_here and can_time:
+                # Micro-step towards the center
+                d_yaw   = full_d_yaw   * STEP_FRACTION
+                d_pitch = full_d_pitch * STEP_FRACTION
+                d_roll  = d_roll_full  * STEP_FRACTION
 
-                    if (d_yaw != 0.0) or (d_pitch != 0.0) or (d_roll != 0.0):
-                        # Update zero-based commanded angles (software frame)
-                        cmd_yaw_deg   += d_yaw
-                        cmd_pitch_deg += d_pitch
-                        cmd_roll_deg  += d_roll
+                # Enforce minimum movement thresholds
+                if abs(d_yaw)   < MIN_STEP_DEG_YAW:   d_yaw = 0.0
+                if abs(d_pitch) < MIN_STEP_DEG_PITCH: d_pitch = 0.0
+                if abs(d_roll)  < MIN_STEP_DEG_ROLL:  d_roll = 0.0
 
-                        ok = send_or_log_angles(
-                            d_yaw, d_pitch, d_roll,
-                            cmd_yaw_deg, cmd_pitch_deg, cmd_roll_deg
-                        )
-                        if ok:
-                            last_send_time = now
-                            sent_this_frame = True
+                if (d_yaw != 0.0) or (d_pitch != 0.0) or (d_roll != 0.0):
+                    # Update zero-based commanded angles
+                    cmd_yaw_deg   += d_yaw
+                    cmd_pitch_deg += d_pitch
+                    cmd_roll_deg  += d_roll
+
+                    ok = send_or_log_angles(
+                        d_yaw, d_pitch, d_roll,
+                        cmd_yaw_deg, cmd_pitch_deg, cmd_roll_deg
+                    )
+                    if ok:
+                        last_send_time = now
+                        sent_this_frame = True
 
         # -------- Telemetry --------
         T = now - t0
         if sent_this_frame or state == SEEKING:
-            print(f"{T:.3f} {d_roll:+.3f} {d_pitch:+.3f} {d_yaw:+.3f} {can_send_flag} {state}")
+            print(f"{T:.3f} {d_roll:+.3f} {d_pitch:+.3f} {d_yaw:+.3f} {state}")
         else:
-            print(f"{T:.3f} +0.000 +0.000 +0.000 0 {state}")
+            print(f"{T:.3f} +0.000 +0.000 +0.000 {state}")
 
         # -------- UI --------
         if DRAW:
             l, t_, r, b = map(int, box)
+            # Green box at CENTER of frame
             cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
-            # Draw center of frame (optical axis / flashlight axis)
-            cv2.drawMarker(frame, (int(center_x), int(center_y)), (0, 200, 0),
-                           cv2.MARKER_CROSS, 12, 2)
-            # Draw current smoothed mouth centroid
+
+            # Cross at anchor = center
+            cv2.drawMarker(
+                frame,
+                (int(center_anchor[0]), int(center_anchor[1])),
+                (0, 200, 0),
+                cv2.MARKER_CROSS, 12, 2
+            )
+
+            # Red dot at smoothed mouth location
             cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
 
             state_txt = "LOCKED" if state == LOCKED else "SEEKING"
@@ -522,8 +513,10 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
             if state == SEEKING:
                 cv2.putText(frame, f"dR:{d_roll:+.2f} dP:{d_pitch:+.2f} dY:{d_yaw:+.2f}",
-                            (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
-            cv2.imshow("Centroid Tracker (center-locked)", frame)
+                            (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                            (40,220,40), 2, cv2.LINE_AA)
+
+            cv2.imshow("Centroid Tracker (center-anchored)", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 
