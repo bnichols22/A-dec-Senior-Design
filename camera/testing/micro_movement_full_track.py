@@ -2,13 +2,13 @@
 # ==============================================================
 # File: full_tracking.py
 # Purpose:
-#   Moving-anchor tracker with explicit state machine:
-#   - LOCKED: box at current anchor; as long as centroid stays inside, do nothing.
-#   - SEEKING: while centroid is outside the stable box, compute the
-#              full offset (old_anchor -> current centroid), but
-#              send only a FRACTION of that as a micro-step. Keep
-#              doing this until the centroid is back inside the box,
-#              then re-anchor and return to LOCKED.
+#   Center-locked tracker with micro-step control:
+#   - LOCKED: stable box is fixed at the center of the frame; as long as
+#             the mouth centroid stays inside, do nothing.
+#   - SEEKING: while centroid is outside the center stable box, compute the
+#              full offset (center -> current centroid), but send only a
+#              FRACTION of that as a micro-step. Keep doing this until the
+#              centroid is back inside the box, then return to LOCKED.
 #
 # Gimbal transport:
 #   - Uses SimpleBGC SerialAPI C library exposed via simplebgc_shim.c
@@ -37,12 +37,12 @@ print(f"# ADEC TEST_LOG = {TEST_LOG}")
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
 
-# These are your current best-guess FOV values (can keep tuning them)
+# Current best-guess FOV values (can keep tuning them)
 FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
-# Stable box: fraction of HALF-frame sizes
-STABLE_SCALAR   = 0.06    # tighten to 0.05 or 0.04 if too tolerant
+# Stable box: fraction of HALF-frame sizes (now centered at image center)
+STABLE_SCALAR   = 0.06
 WINDOW_SEC      = 0.6     # history window for stability metrics
 
 # Stability gates (used in SEEKING — only send steps when motion isn't crazy)
@@ -51,10 +51,10 @@ POS_STD_THRESH_PX = 2.5   # positional stddev threshold
 
 # Micro-step control:
 # We move only this fraction of the *full* offset per command.
-STEP_FRACTION = 0.2       # 20% of the distance per step (tune 0.1–0.3)
+STEP_FRACTION = 0.3       # 30% of the distance per step (tune 0.1–0.4)
 
 # Send gating
-SEND_TIME_LIMITER = 0.25  # min seconds between sends (rate limit, faster for micro-steps)
+SEND_TIME_LIMITER = 0.18  # min seconds between sends (rate limit; smooth-ish micro-steps)
 MIN_STEP_DEG_YAW   = 0.3  # ignore tiny commands
 MIN_STEP_DEG_PITCH = 0.3
 MIN_STEP_DEG_ROLL  = 1.0
@@ -93,8 +93,9 @@ def pixels_to_deg(dx_px, dy_px, w, h, fov_h, fov_v):
 def angle_deg(p1, p2):
     return math.degrees(math.atan2(p2[1]-p1[1], p2[0]-p1[0]))
 
-def build_stable_box(anchor_xy, w, h, scalar):
-    cx, cy = anchor_xy
+def build_stable_box(center_xy, w, h, scalar):
+    """Build a box around a chosen center (here: always image center)."""
+    cx, cy = center_xy
     half_w = scalar * (w/2.0)
     half_h = scalar * (h/2.0)
     return (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
@@ -312,9 +313,7 @@ def main():
     # State
     t0 = time.time()
     prev_smoothed = None
-    prev_roll_deg = None
     prev_time = None
-    anchor = None
     last_send_time = 0.0
     lost = 0
 
@@ -322,6 +321,9 @@ def main():
     cmd_roll_deg  = 0.0
     cmd_pitch_deg = 0.0
     cmd_yaw_deg   = 0.0
+
+    # Optional: roll target (keeps roll near initial center orientation)
+    roll_target_deg = None
 
     LOCKED, SEEKING = 0, 1
     state = LOCKED
@@ -333,7 +335,7 @@ def main():
     # Clear the test file at the start of every run
     try:
         with open(TEST_LOG, "w") as f:
-            f.write("# SimpleBGC commands (TEST/zero-based, micro-steps) — fresh run\n")
+            f.write("# SimpleBGC commands (TEST/zero-based, center-locked micro-steps) — fresh run\n")
             f.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         print(f"# Cleared {TEST_LOG} for a new session.")
     except Exception as e:
@@ -348,6 +350,11 @@ def main():
             break
         now = time.time()
         h, w = frame.shape[:2]
+
+        # Define the "ideal" center point for the mouth + light axis
+        center_x = w / 2.0
+        center_y = h / 2.0
+        center_pt = (center_x, center_y)
 
         # --- detect mouth centroid + roll
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -376,12 +383,11 @@ def main():
             lost += 1
             if lost > MAX_LOST_FRAMES:
                 prev_smoothed = None
-                prev_roll_deg = None
                 prev_time = None
             T = now - t0
             print(f"{T:.3f} +0.000 +0.000 +0.000 0 {state}")
             if DRAW:
-                cv2.imshow("Centroid Tracker (stateful)", frame)
+                cv2.imshow("Centroid Tracker (center-locked)", frame)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
             continue
@@ -390,17 +396,18 @@ def main():
         # Smooth centroid
         smoothed = ema_point(centroid, prev_smoothed, SMOOTH_ALPHA)
 
-        # First-time anchor + timing init
-        if anchor is None:
-            anchor = smoothed
-            if roll_now_deg is not None:
-                prev_roll_deg = roll_now_deg
+        # Initialize timing
         if prev_time is None:
             prev_time = now
 
-        # Build LOCKED box (at anchor)
-        box = build_stable_box(anchor, w, h, STABLE_SCALAR)
+        # Build central LOCKED box (always around image center)
+        box = build_stable_box(center_pt, w, h, STABLE_SCALAR)
         inside = inside_box(smoothed, box)
+
+        # If we don't have a roll target yet, set it when we first see a face
+        # inside the box (i.e., "good" starting orientation).
+        if inside and roll_now_deg is not None and roll_target_deg is None:
+            roll_target_deg = roll_now_deg
 
         # Compute dt-based velocity for stability
         dt = max(1e-6, now - prev_time)
@@ -422,7 +429,7 @@ def main():
         # ---------- STATE MACHINE ----------
         if state == LOCKED:
             if not inside:
-                # we just left the stable region -> start SEEKING
+                # We just left the center stable region -> start SEEKING
                 state = SEEKING
                 pos_x.clear()
                 pos_y.clear()
@@ -441,26 +448,25 @@ def main():
             vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
             is_stable_here = (vel_med < VEL_THRESH_DEG_S) and (pos_std < POS_STD_THRESH_PX)
 
-            # If we've successfully moved the face back inside the box,
-            # we consider the move "done", re-anchor, and go back to LOCKED.
+            # If we've successfully moved the face back inside the center box,
+            # we're done: go back to LOCKED.
             if inside:
-                anchor = smoothed
                 if roll_now_deg is not None:
-                    prev_roll_deg = roll_now_deg
+                    roll_target_deg = roll_now_deg if roll_target_deg is None else roll_target_deg
                 pos_x.clear()
                 pos_y.clear()
                 vel_h.clear()
                 state = LOCKED
             else:
-                # Compute full desired offsets (old anchor -> current)
-                dx_px = smoothed[0] - anchor[0]
-                dy_px = smoothed[1] - anchor[1]
+                # Compute full desired offsets (center -> current)
+                dx_px = smoothed[0] - center_x
+                dy_px = smoothed[1] - center_y
                 full_d_yaw, full_d_pitch = pixels_to_deg(dx_px, dy_px, w, h, FOV_H_DEG, FOV_V_DEG)
 
-                # Roll offset from initial roll in this SEEKING episode
+                # Roll offset from target roll (if we have one)
                 d_roll_full = 0.0
-                if roll_now_deg is not None and prev_roll_deg is not None:
-                    d_roll_full = roll_now_deg - prev_roll_deg
+                if roll_now_deg is not None and roll_target_deg is not None:
+                    d_roll_full = roll_now_deg - roll_target_deg
 
                 # Apply axis signs
                 full_d_yaw   = AXIS_SIGN["yaw"]   * full_d_yaw
@@ -505,8 +511,10 @@ def main():
         if DRAW:
             l, t_, r, b = map(int, box)
             cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
-            cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
+            # Draw center of frame (optical axis / flashlight axis)
+            cv2.drawMarker(frame, (int(center_x), int(center_y)), (0, 200, 0),
                            cv2.MARKER_CROSS, 12, 2)
+            # Draw current smoothed mouth centroid
             cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
 
             state_txt = "LOCKED" if state == LOCKED else "SEEKING"
@@ -515,7 +523,7 @@ def main():
             if state == SEEKING:
                 cv2.putText(frame, f"dR:{d_roll:+.2f} dP:{d_pitch:+.2f} dY:{d_yaw:+.2f}",
                             (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
-            cv2.imshow("Centroid Tracker (stateful)", frame)
+            cv2.imshow("Centroid Tracker (center-locked)", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 
