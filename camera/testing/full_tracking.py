@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # ==============================================================
-# File: centroid_sender.py
+# File: full_tracking.py
 # Purpose:
 #   Moving-anchor tracker with explicit state machine:
 #   - LOCKED: box at current anchor; when centroid exits, enter SEEKING
 #   - SEEKING: wait until new position is "stable", then emit ONE delta
 #              (old_anchor -> new_stable_centroid), re-anchor, back to LOCKED
-#   Console prints show live prospective deltas in SEEKING and the actual
-#   deltas when a command is emitted.
 #
-# SBGC transport:
-#   - Protocol v1 framing: [0x3E][CMD][LEN][HDR_SUM][PAYLOAD...][PAY_SUM]
-#   - CMD_CONTROL (ID 67) in ANGLE mode; ANGLE units are 14-bit (16384/360 deg)
-#   - Payload axis order is ROLL, PITCH, YAW (int16 LE)
+# Gimbal transport:
+#   - Uses SimpleBGC SerialAPI C library exposed via simplebgc_shim.c
+#   - Python works in ZERO-BASED ABSOLUTE angles:
+#       * At startup, we read the current board angles and call that (0,0,0)
+#       * We keep cmd_roll/pitch/yaw in this zero-based frame
+#       * Before sending, we add the startup baseline back in so the board
+#         gets its own absolute angles.
 # ==============================================================
 
-import os, sys, time, math, warnings, statistics
+import os, sys, time, math, warnings, statistics, ctypes
 import cv2
 import mediapipe as mp
 from collections import deque
@@ -32,8 +33,8 @@ print(f"# ADEC TEST_LOG = {TEST_LOG}")
 
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
-FOV_H_DEG = 95.0
-FOV_V_DEG = 60.0
+FOV_H_DEG = 65.0
+FOV_V_DEG = 48.75
 
 # Stable box: fraction of HALF-frame sizes
 STABLE_SCALAR   = 0.06    # tighten to 0.05 or 0.04 if too tolerant
@@ -51,13 +52,15 @@ MIN_STEP_DEG_PITCH = 0.5
 MIN_STEP_DEG_ROLL  = 1.0
 
 # Sign convention to match gimbal axes (tune as needed)
-AXIS_SIGN = {"yaw": +1, "pitch": -1, "roll": +1}
+AXIS_SIGN = {"yaw": 1, "pitch": 1, "roll": 1}
 
-# Serial / test control
-TEST = 1                 # 1=write frames to TEST_LOG; 0=send over serial
-SBGC_PORT = "/dev/ttyACM0"
-SBGC_BAUD = 115200
-SBGC_TIMEOUT_S = 0.05
+# Gimbal / test control
+TEST = 0  # 1=log only; 0=send to gimbal via libsimplebgc.so
+
+# Path to the shared library we built from SerialAPI + shim
+LIB_PATH = os.path.expanduser(
+    "~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI/libsimplebgc.so"
+)
 
 DRAW = True
 SMOOTH_ALPHA = 0.25
@@ -70,7 +73,8 @@ sys.stderr = open(LOG_PATH, "w")
 
 # ---------------- Utilities ----------------
 def ema_point(curr, prev, alpha):
-    if prev is None: return curr
+    if prev is None:
+        return curr
     return (alpha*curr[0] + (1-alpha)*prev[0],
             alpha*curr[1] + (1-alpha)*prev[1])
 
@@ -88,86 +92,159 @@ def build_stable_box(anchor_xy, w, h, scalar):
     return (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
 
 def inside_box(pt, box):
-    x, y = pt; l, t, r, b = box
+    x, y = pt
+    l, t, r, b = box
     return (l <= x <= r) and (t <= y <= b)
 
 class TimedHist:
     def __init__(self, win_sec):
         self.win = win_sec
         self.buf = deque()
-    def add(self, t, v): self.buf.append((t, v)); self._trim(t)
-    def values(self): return [v for _, v in self.buf]
-    def clear(self): self.buf.clear()
+    def add(self, t, v):
+        self.buf.append((t, v))
+        self._trim(t)
+    def values(self):
+        return [v for _, v in self.buf]
+    def clear(self):
+        self.buf.clear()
     def _trim(self, now):
         cut = now - self.win
         while self.buf and self.buf[0][0] < cut:
             self.buf.popleft()
 
-# ---------------- SimpleBGC v1 framing ----------------
-SBGC_START_V1    = 0x3E
-SBGC_CMD_CONTROL = 67  # 0x43 (CMD_CONTROL)
+# ----------------------------------------------------------------------
+# SBGC shim bindings (ctypes) + zero-based baseline
+# ----------------------------------------------------------------------
+_bgc_lib = None
+_bgc_initialized = False
 
-def angle_deg_to_14bit(deg: float) -> int:
+# NEW: baseline angles at startup (board frame)
+_baseline_yaw_deg   = 0.0
+_baseline_pitch_deg = 0.0
+_baseline_roll_deg  = 0.0
+_baseline_set       = False
+
+def init_sbgc():
+    """Load libsimplebgc.so, set prototypes, init board, and capture baseline."""
+    global _bgc_lib, _bgc_initialized
+    global _baseline_yaw_deg, _baseline_pitch_deg, _baseline_roll_deg, _baseline_set
+
+    if TEST == 1:
+        print("# TEST mode: not loading SBGC library.")
+        _bgc_lib = None
+        _bgc_initialized = False
+        _baseline_yaw_deg = 0.0
+        _baseline_pitch_deg = 0.0
+        _baseline_roll_deg = 0.0
+        _baseline_set = True
+        return
+
+    try:
+        _bgc_lib = ctypes.CDLL(LIB_PATH)
+        print(f"# Loaded SBGC library from {LIB_PATH}")
+    except OSError as e:
+        print(f"# ERROR loading {LIB_PATH}: {e}")
+        _bgc_lib = None
+        _bgc_initialized = False
+        return
+
+    # Prototypes from simplebgc_shim.c
+    _bgc_lib.bgc_init.argtypes = []
+    _bgc_lib.bgc_init.restype  = ctypes.c_int
+
+    # bgc_control_angles(float yaw_deg, float pitch_deg, float roll_deg)
+    _bgc_lib.bgc_control_angles.argtypes = [
+        ctypes.c_float, ctypes.c_float, ctypes.c_float
+    ]
+    _bgc_lib.bgc_control_angles.restype = ctypes.c_int
+
+    # Optional helpers from shim
+    # int bgc_beep_once(void);
+    try:
+        _bgc_lib.bgc_beep_once.argtypes = []
+        _bgc_lib.bgc_beep_once.restype  = ctypes.c_int
+    except AttributeError:
+        pass  # not fatal if not present
+
+    # int bgc_get_angles(float *yaw_deg, float *pitch_deg, float *roll_deg);
+    try:
+        _bgc_lib.bgc_get_angles.argtypes = [
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        _bgc_lib.bgc_get_angles.restype = ctypes.c_int
+    except AttributeError:
+        _bgc_lib.bgc_get_angles = None
+
+    # Initialize library (sets control config + motors ON inside shim)
+    rc = _bgc_lib.bgc_init()
+    if rc != 0:
+        print(f"# ERROR: bgc_init() returned {rc}")
+        _bgc_initialized = False
+        return
+
+    # NEW: capture baseline board angles at startup
+    if hasattr(_bgc_lib, "bgc_get_angles") and _bgc_lib.bgc_get_angles is not None:
+        yaw = ctypes.c_float()
+        pitch = ctypes.c_float()
+        roll = ctypes.c_float()
+        rc2 = _bgc_lib.bgc_get_angles(
+            ctypes.byref(yaw),
+            ctypes.byref(pitch),
+            ctypes.byref(roll),
+        )
+        if rc2 == 0:
+            _baseline_yaw_deg   = float(yaw.value)
+            _baseline_pitch_deg = float(pitch.value)
+            _baseline_roll_deg  = float(roll.value)
+            _baseline_set       = True
+            print(f"# Baseline angles captured from board:")
+            print(f"#   yaw={_baseline_yaw_deg:.2f}, "
+                  f"pitch={_baseline_pitch_deg:.2f}, "
+                  f"roll={_baseline_roll_deg:.2f}")
+        else:
+            print(f"# WARN: bgc_get_angles() returned {rc2}, "
+                  f"using baseline = 0,0,0")
+            _baseline_yaw_deg = 0.0
+            _baseline_pitch_deg = 0.0
+            _baseline_roll_deg = 0.0
+            _baseline_set = True
+    else:
+        print("# WARN: bgc_get_angles not available in shim; "
+              "using baseline = 0,0,0")
+        _baseline_yaw_deg = 0.0
+        _baseline_pitch_deg = 0.0
+        _baseline_roll_deg = 0.0
+        _baseline_set = True
+
+    # Optional: audible beep to signal ready
+    if hasattr(_bgc_lib, "bgc_beep_once"):
+        try:
+            _bgc_lib.bgc_beep_once()
+        except Exception:
+            pass
+
+    _bgc_initialized = True
+    print("# SBGC initialization complete (zero-based frame set).")
+
+# ----------------------------------------------------------------------
+# Output: send or write to file (angles, not raw packets)
+# ----------------------------------------------------------------------
+def write_test_line(d_yaw, d_pitch, d_roll,
+                    abs_yaw, abs_pitch, abs_roll,
+                    board_yaw, board_pitch, board_roll):
     """
-    Convert degrees to SimpleBGC 'ANGLE' units (int16),
-    where 1 LSB = 360/16384 = 0.02197265625 deg.
+    Log attempted commands to TEST_LOG instead of moving gimbal.
     """
-    units_per_deg = 16384.0 / 360.0  # ≈ 45.511111...
-    val = int(round(deg * units_per_deg))
-    # clamp to int16
-    return max(-32768, min(32767, val))
-
-def sbgc_v1_header_checksum(cmd_id: int, payload_len: int) -> int:
-    # sum of [CMD_ID + LEN] mod 256
-    return (cmd_id + payload_len) & 0xFF
-
-def sbgc_v1_payload_checksum(payload: bytes) -> int:
-    # sum of all payload bytes mod 256
-    return (sum(payload) & 0xFF)
-
-def build_cmd_control_angles_v1(d_yaw_deg: float,
-                                d_pitch_deg: float,
-                                d_roll_deg: float) -> bytes:
-    """
-    Build CMD_CONTROL (ID 67) in ANGLE mode for all axes.
-    ANGLE array order is ROLL, PITCH, YAW (int16, little-endian).
-    We leave SPEED fields = 0 to use board profile speeds.
-    """
-    # Control mode: ANGLE for all axes. (Mode value is 2 in most firmwares.)
-    CONTROL_MODE_ANGLE = 2
-
-    # Convert degrees -> 14-bit angle units
-    a_roll  = angle_deg_to_14bit(d_roll_deg)
-    a_pitch = angle_deg_to_14bit(d_pitch_deg)
-    a_yaw   = angle_deg_to_14bit(d_yaw_deg)
-
-    # Legacy/common payload layout:
-    # [MODE(1u), FLAGS(1u),
-    #  SPEED_R(2s), SPEED_P(2s), SPEED_Y(2s),
-    #  ANGLE_R(2s), ANGLE_P(2s), ANGLE_Y(2s)]
-    payload = bytearray()
-    payload += bytes([CONTROL_MODE_ANGLE])                  # MODE
-    payload += bytes([0x00])                                # FLAGS
-    payload += (0).to_bytes(2, 'little', signed=True)       # SPEED_R
-    payload += (0).to_bytes(2, 'little', signed=True)       # SPEED_P
-    payload += (0).to_bytes(2, 'little', signed=True)       # SPEED_Y
-    payload += a_roll.to_bytes(2, 'little', signed=True)    # ANGLE_R
-    payload += a_pitch.to_bytes(2, 'little', signed=True)   # ANGLE_P
-    payload += a_yaw.to_bytes(2, 'little', signed=True)     # ANGLE_Y
-
-    # Frame (Protocol v1)
-    cmd = SBGC_CMD_CONTROL
-    length = len(payload)
-    header = bytearray([SBGC_START_V1, cmd, length, sbgc_v1_header_checksum(cmd, length)])
-    frame  = header + payload + bytearray([sbgc_v1_payload_checksum(payload)])
-    return bytes(frame)
-
-# ------------- Output: send or write to file -------------
-def write_test_line(frame_bytes, yaw_deg, pitch_deg, roll_deg):
     try:
         with open(TEST_LOG, 'a', buffering=1) as f:
-            f.write(f"T={time.time():.3f} R={roll_deg:+.2f} P={pitch_deg:+.2f} Y={yaw_deg:+.2f} | ")
-            f.write("FRAME=" + " ".join(f"{b:02X}" for b in frame_bytes) + "\n")
+            f.write(
+                f"T={time.time():.3f} "
+                f"dR={d_roll:+.2f} dP={d_pitch:+.2f} dY={d_yaw:+.2f} | "
+                f"absR={abs_roll:+.2f} absP={abs_pitch:+.2f} absY={abs_yaw:+.2f} | "
+                f"boardR={board_roll:+.2f} boardP={board_pitch:+.2f} boardY={board_yaw:+.2f}\n"
+            )
             f.flush()
             os.fsync(f.fileno())
         return True
@@ -175,23 +252,47 @@ def write_test_line(frame_bytes, yaw_deg, pitch_deg, roll_deg):
         print(f"# TEST_FILE_ERROR: {e}")
         return False
 
-def send_or_log_frame(yaw_deg, pitch_deg, roll_deg):
-    frame_bytes = build_cmd_control_angles_v1(yaw_deg, pitch_deg, roll_deg)
+def send_or_log_angles(d_yaw_deg, d_pitch_deg, d_roll_deg,
+                       abs_yaw_deg, abs_pitch_deg, abs_roll_deg):
+    """
+    If TEST=1: only log to file.
+    If TEST=0: send angles to gimbal via bgc_control_angles(),
+               using zero-based software frame:
+                   board_angle = baseline_angle + abs_angle
+    """
+    global _baseline_yaw_deg, _baseline_pitch_deg, _baseline_roll_deg
+
+    # Compute board-frame absolute angles by adding baseline
+    board_yaw   = _baseline_yaw_deg   + abs_yaw_deg
+    board_pitch = _baseline_pitch_deg + abs_pitch_deg
+    board_roll  = _baseline_roll_deg  + abs_roll_deg
+
     if TEST == 1:
-        return write_test_line(frame_bytes, yaw_deg, pitch_deg, roll_deg)
-    try:
-        import serial
-        with serial.Serial(SBGC_PORT, SBGC_BAUD, timeout=SBGC_TIMEOUT_S) as ser:
-            ser.write(frame_bytes)
-            # Optional: read a short response window for CMD_CONFIRM
-            # resp = ser.read(64)
-        return True
-    except Exception as e:
-        print(f"# SEND_ERROR: {e}")
+        return write_test_line(d_yaw_deg, d_pitch_deg, d_roll_deg,
+                               abs_yaw_deg, abs_pitch_deg, abs_roll_deg,
+                               board_yaw, board_pitch, board_roll)
+
+    if _bgc_lib is None or not _bgc_initialized:
+        print("# ERROR: SBGC shim not initialized.")
         return False
+
+    # Shim order: yaw, pitch, roll
+    rc = _bgc_lib.bgc_control_angles(
+        ctypes.c_float(board_roll),
+        ctypes.c_float(board_pitch),
+        ctypes.c_float(board_yaw),
+    )
+    if rc != 0:
+        print(f"# SEND_ERROR: bgc_control_angles() returned {rc}")
+        return False
+
+    return True
 
 # ---------------- Main loop (stateful) ----------------
 def main():
+    # Init SBGC library & motors if not in TEST mode
+    init_sbgc()
+
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
         static_image_mode=False, max_num_faces=1, refine_landmarks=True,
@@ -200,7 +301,8 @@ def main():
 
     cap = cv2.VideoCapture(CAM_INDEX)
     if not cap.isOpened():
-        print("ERROR: Unable to open camera", CAM_INDEX); sys.exit(1)
+        print("ERROR: Unable to open camera", CAM_INDEX)
+        sys.exit(1)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     # State
@@ -211,6 +313,11 @@ def main():
     anchor = None
     last_send_time = 0.0
     lost = 0
+
+    # Zero-based absolute commanded angles (software frame)
+    cmd_roll_deg  = 0.0
+    cmd_pitch_deg = 0.0
+    cmd_yaw_deg   = 0.0
 
     LOCKED, SEEKING = 0, 1
     state = LOCKED
@@ -223,7 +330,7 @@ def main():
     # Clear the test file at the start of every run
     try:
         with open(TEST_LOG, "w") as f:
-            f.write("# SimpleBGC framed commands (TEST mode) — fresh run\n")
+            f.write("# SimpleBGC commands (TEST/zero-based) — fresh run\n")
             f.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         print(f"# Cleared {TEST_LOG} for a new session.")
     except Exception as e:
@@ -234,7 +341,8 @@ def main():
     while True:
         ok, frame = cap.read()
         if not ok:
-            print("# WARN: frame grab failed"); break
+            print("# WARN: frame grab failed")
+            break
         now = time.time()
         h, w = frame.shape[:2]
 
@@ -270,8 +378,9 @@ def main():
             T = now - t0
             print(f"{T:.3f} +0.000 +0.000 +0.000 0 {state}")
             if DRAW:
-                cv2.imshow("Centroid Tracker (stateful)", frame)
-                if cv2.waitKey(1) & 0xFF == 27: break
+                cv2.imshow("Centroid Sender (stateful)", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
             continue
         lost = 0
 
@@ -308,14 +417,16 @@ def main():
         sent_this_frame = False
 
         # ---------- STATE MACHINE ----------
-        if state == 0:  # LOCKED
+        if state == LOCKED:
             if not inside:
-                state = 1  # SEEKING
+                state = SEEKING
                 stable_timer = None
-                pos_x.clear(); pos_y.clear(); vel_h.clear()
-            # In LOCKED we do not move the box nor send anything
+                pos_x.clear()
+                pos_y.clear()
+                vel_h.clear()
         else:  # SEEKING
-            pos_x.add(now, smoothed[0]); pos_y.add(now, smoothed[1])
+            pos_x.add(now, smoothed[0])
+            pos_y.add(now, smoothed[1])
             vel_h.add(now, speed)
 
             xs, ys = pos_x.values(), pos_y.values()
@@ -357,25 +468,34 @@ def main():
                 if abs(d_pitch) < MIN_STEP_DEG_PITCH: d_pitch = 0.0
                 if abs(d_roll)  < MIN_STEP_DEG_ROLL:  d_roll = 0.0
 
-                # Only send if something nonzero remains
                 if (d_yaw != 0.0) or (d_pitch != 0.0) or (d_roll != 0.0):
-                    ok = send_or_log_frame(d_yaw, d_pitch, d_roll)
+                    # Update zero-based cmd angles
+                    cmd_yaw_deg   += d_yaw
+                    cmd_pitch_deg += d_pitch
+                    cmd_roll_deg  += d_roll
+
+                    ok = send_or_log_angles(
+                        d_yaw, d_pitch, d_roll,
+                        cmd_yaw_deg, cmd_pitch_deg, cmd_roll_deg
+                    )
                     if ok:
                         last_send_time = now
-                    sent_this_frame = True
+                        sent_this_frame = True
 
                 # Re-anchor regardless (we’ve “accepted” the new stable pose)
                 anchor = smoothed
                 if roll_now_deg is not None:
                     prev_roll_deg = roll_now_deg
 
-                pos_x.clear(); pos_y.clear(); vel_h.clear()
+                pos_x.clear()
+                pos_y.clear()
+                vel_h.clear()
                 stable_timer = None
-                state = 0  # back to LOCKED
+                state = LOCKED
 
         # -------- Telemetry --------
         T = now - t0
-        if sent_this_frame or state == 1:
+        if sent_this_frame or state == SEEKING:
             print(f"{T:.3f} {d_roll:+.3f} {d_pitch:+.3f} {d_yaw:+.3f} {can_send_flag} {state}")
         else:
             print(f"{T:.3f} +0.000 +0.000 +0.000 0 {state}")
@@ -388,13 +508,13 @@ def main():
                            cv2.MARKER_CROSS, 12, 2)
             cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
 
-            state_txt = "LOCKED" if state == 0 else "SEEKING"
+            state_txt = "LOCKED" if state == LOCKED else "SEEKING"
             cv2.putText(frame, f"state:{state_txt}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
-            if state == 1:
+            if state == SEEKING:
                 cv2.putText(frame, f"dR:{d_roll:+.2f} dP:{d_pitch:+.2f} dY:{d_yaw:+.2f}",
                             (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
-            cv2.imshow("Centroid Tracker (stateful)", frame)
+            cv2.imshow("Centroid Sender (stateful)", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 

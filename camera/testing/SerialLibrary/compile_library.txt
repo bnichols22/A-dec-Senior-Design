@@ -1,0 +1,34 @@
+cd ~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI
+
+# 1) Clean old objects / .so
+rm -f *.o core/*.o modules/*/*.o drivers/*/*.o libsimplebgc.so
+
+# 2) Compile core
+gcc -fPIC -c core/debug/debug.c         -o debug.o
+gcc -fPIC -c core/highLayer/highLayer.c -o highLayer.o
+gcc -fPIC -c core/parser/parser.c       -o parser.o
+gcc -fPIC -c core/commandBuild.c        -o commandBuild.o
+gcc -fPIC -c core/lowLayer.c            -o lowLayer.o
+
+# 3) Linux driver
+gcc -fPIC -c drivers/driverLinux/driverLinux.c -o driverLinux.o
+
+# 4) Modules (ADJVAR, CONTROL, PROFILES, REALTIME, SERVICE)
+gcc -fPIC -c modules/adjvar/adjvar.c               -o adjvar.o
+gcc -fPIC -c modules/gimbalControl/gimbalControl.c -o gimbalControl.o
+gcc -fPIC -c modules/profiles/profiles.c           -o profiles.o
+gcc -fPIC -c modules/realtime/realtime.c           -o realtime.o
+gcc -fPIC -c modules/service/service.c             -o service.o
+
+# 5) Main library & shim
+gcc -fPIC -c sbgc32.c          -o sbgc32.o
+gcc -fPIC -c simplebgc_shim.c  -o simplebgc_shim.o
+
+# 6) Link shared library
+gcc -shared -o libsimplebgc.so \
+    sbgc32.o debug.o highLayer.o parser.o commandBuild.o lowLayer.o \
+    driverLinux.o \
+    adjvar.o gimbalControl.o profiles.o realtime.o service.o \
+    -lpthread
+
+ls -l libsimplebgc.so
