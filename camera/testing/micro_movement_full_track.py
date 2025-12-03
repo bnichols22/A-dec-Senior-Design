@@ -8,7 +8,12 @@
 #              full offset (old_anchor -> current centroid), but
 #              send only a FRACTION of that as a micro-step. Keep
 #              doing this until the centroid is back inside the box,
-#              then re-anchor and return to LOCKED.
+#              then return to LOCKED.
+#
+# NOTE (modified):
+#   Here we lock the stable box (anchor) to the CENTER of the frame
+#   so it always stays on the optical axis. The anchor never moves
+#   to the mouth centroid.
 #
 # Gimbal transport:
 #   - Uses SimpleBGC SerialAPI C library exposed via simplebgc_shim.c
@@ -314,7 +319,7 @@ def main():
     prev_smoothed = None
     prev_roll_deg = None
     prev_time = None
-    anchor = None
+    anchor = None      # will be locked to center of frame
     last_send_time = 0.0
     lost = 0
 
@@ -348,6 +353,11 @@ def main():
             break
         now = time.time()
         h, w = frame.shape[:2]
+
+        # --------- LOCK ANCHOR TO CENTER OF FRAME ---------
+        if anchor is None:
+            # First time we know width/height, set anchor to optical axis
+            anchor = (w / 2.0, h / 2.0)
 
         # --- detect mouth centroid + roll
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -390,15 +400,11 @@ def main():
         # Smooth centroid
         smoothed = ema_point(centroid, prev_smoothed, SMOOTH_ALPHA)
 
-        # First-time anchor + timing init
-        if anchor is None:
-            anchor = smoothed
-            if roll_now_deg is not None:
-                prev_roll_deg = roll_now_deg
+        # Timing init
         if prev_time is None:
             prev_time = now
 
-        # Build LOCKED box (at anchor)
+        # Build stable box at fixed center anchor
         box = build_stable_box(anchor, w, h, STABLE_SCALAR)
         inside = inside_box(smoothed, box)
 
@@ -422,11 +428,14 @@ def main():
         # ---------- STATE MACHINE ----------
         if state == LOCKED:
             if not inside:
-                # we just left the stable region -> start SEEKING
+                # We just left the stable region -> start SEEKING
                 state = SEEKING
                 pos_x.clear()
                 pos_y.clear()
                 vel_h.clear()
+                # When we first leave center, remember roll if available
+                if roll_now_deg is not None and prev_roll_deg is None:
+                    prev_roll_deg = roll_now_deg
         else:  # SEEKING
             # Update histories for stability metrics
             pos_x.add(now, smoothed[0])
@@ -441,10 +450,10 @@ def main():
             vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
             is_stable_here = (vel_med < VEL_THRESH_DEG_S) and (pos_std < POS_STD_THRESH_PX)
 
-            # If we've successfully moved the face back inside the box,
-            # we consider the move "done", re-anchor, and go back to LOCKED.
+            # If we've successfully moved the face back inside the CENTER box,
+            # we consider the move "done" and go back to LOCKED.
+            # NOTE: we DO NOT move the anchor; it stays at the center.
             if inside:
-                anchor = smoothed
                 if roll_now_deg is not None:
                     prev_roll_deg = roll_now_deg
                 pos_x.clear()
@@ -452,10 +461,12 @@ def main():
                 vel_h.clear()
                 state = LOCKED
             else:
-                # Compute full desired offsets (old anchor -> current)
+                # Compute full desired offsets (center anchor -> current)
                 dx_px = smoothed[0] - anchor[0]
                 dy_px = smoothed[1] - anchor[1]
-                full_d_yaw, full_d_pitch = pixels_to_deg(dx_px, dy_px, w, h, FOV_H_DEG, FOV_V_DEG)
+                full_d_yaw, full_d_pitch = pixels_to_deg(
+                    dx_px, dy_px, w, h, FOV_H_DEG, FOV_V_DEG
+                )
 
                 # Roll offset from initial roll in this SEEKING episode
                 d_roll_full = 0.0
@@ -493,6 +504,7 @@ def main():
                         if ok:
                             last_send_time = now
                             sent_this_frame = True
+                            can_send_flag = 1
 
         # -------- Telemetry --------
         T = now - t0
@@ -504,9 +516,12 @@ def main():
         # -------- UI --------
         if DRAW:
             l, t_, r, b = map(int, box)
+            # Green stable box locked at center (anchor)
             cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
+            # Crosshair at the anchor = frame center
             cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
                            cv2.MARKER_CROSS, 12, 2)
+            # Red dot for mouth centroid
             cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
 
             state_txt = "LOCKED" if state == LOCKED else "SEEKING"
@@ -515,7 +530,7 @@ def main():
             if state == SEEKING:
                 cv2.putText(frame, f"dR:{d_roll:+.2f} dP:{d_pitch:+.2f} dY:{d_yaw:+.2f}",
                             (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
-            cv2.imshow("Centroid Tracker (stateful)", frame)
+            cv2.imshow("Centroid Tracker (center-locked box)", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 
@@ -525,4 +540,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
