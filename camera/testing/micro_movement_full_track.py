@@ -7,13 +7,14 @@
 #   - SEEKING: while centroid is outside the stable box, compute the
 #              full offset (old_anchor -> current centroid), but
 #              send only a FRACTION of that as a micro-step. Keep
-#              doing this until the centroid is back inside the box,
-#              then return to LOCKED.
+#              doing this until the centroid is within a tighter
+#              threshold around the anchor, then return to LOCKED.
 #
 # NOTE (modified):
 #   Here we lock the stable box (anchor) to the CENTER of the frame
 #   so it always stays on the optical axis. The anchor never moves
-#   to the mouth centroid.
+#   to the mouth centroid. We also use STABLE_STOP_SEEKING_THRESHOLD
+#   as a stricter "how close to center is good enough" criterion.
 #
 # Gimbal transport:
 #   - Uses SimpleBGC SerialAPI C library exposed via simplebgc_shim.c
@@ -49,6 +50,11 @@ FOV_V_DEG = 48.75
 # Stable box: fraction of HALF-frame sizes
 STABLE_SCALAR   = 0.06    # tighten to 0.05 or 0.04 if too tolerant
 WINDOW_SEC      = 0.6     # history window for stability metrics
+
+# How close to center is "good enough" to stop SEEKING
+# This is a normalized radial distance in [0,1]:
+#   0.05 means the distance from center is <= 5% of half-frame (roughly).
+STABLE_STOP_SEEKING_THRESHOLD = 0.05
 
 # Stability gates (used in SEEKING — only send steps when motion isn't crazy)
 VEL_THRESH_DEG_S  = 2.5   # median angular speed threshold
@@ -408,6 +414,15 @@ def main():
         box = build_stable_box(anchor, w, h, STABLE_SCALAR)
         inside = inside_box(smoothed, box)
 
+        # Compute normalized radial distance from center (for stop threshold)
+        dx_center = smoothed[0] - anchor[0]
+        dy_center = smoothed[1] - anchor[1]
+        # Normalize by half-width and half-height so typical values are ~[-1,1]
+        norm_dx = dx_center / (w / 2.0)
+        norm_dy = dy_center / (h / 2.0)
+        radial_norm = math.hypot(norm_dx, norm_dy)
+        within_stop_thresh = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
+
         # Compute dt-based velocity for stability
         dt = max(1e-6, now - prev_time)
         if prev_smoothed is None:
@@ -450,10 +465,10 @@ def main():
             vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
             is_stable_here = (vel_med < VEL_THRESH_DEG_S) and (pos_std < POS_STD_THRESH_PX)
 
-            # If we've successfully moved the face back inside the CENTER box,
-            # we consider the move "done" and go back to LOCKED.
-            # NOTE: we DO NOT move the anchor; it stays at the center.
-            if inside:
+            # NEW: stop SEEKING when we're within the tighter radial threshold,
+            # not just when we're barely inside the box.
+            # (Anchor stays fixed at center.)
+            if within_stop_thresh:
                 if roll_now_deg is not None:
                     prev_roll_deg = roll_now_deg
                 pos_x.clear()
@@ -509,9 +524,10 @@ def main():
         # -------- Telemetry --------
         T = now - t0
         if sent_this_frame or state == SEEKING:
-            print(f"{T:.3f} {d_roll:+.3f} {d_pitch:+.3f} {d_yaw:+.3f} {can_send_flag} {state}")
+            print(f"{T:.3f} {d_roll:+.3f} {d_pitch:+.3f} {d_yaw:+.3f} {can_send_flag} {state} "
+                  f"radial_norm={radial_norm:.3f}")
         else:
-            print(f"{T:.3f} +0.000 +0.000 +0.000 0 {state}")
+            print(f"{T:.3f} +0.000 +0.000 +0.000 0 {state} radial_norm={radial_norm:.3f}")
 
         # -------- UI --------
         if DRAW:
@@ -530,6 +546,9 @@ def main():
             if state == SEEKING:
                 cv2.putText(frame, f"dR:{d_roll:+.2f} dP:{d_pitch:+.2f} dY:{d_yaw:+.2f}",
                             (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
+                cv2.putText(frame, f"r={radial_norm:.3f}",
+                            (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
+
             cv2.imshow("Centroid Tracker (center-locked box)", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
