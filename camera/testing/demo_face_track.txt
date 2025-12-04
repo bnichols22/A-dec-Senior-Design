@@ -1,0 +1,113 @@
++------------------------------------------------------+
+|                    START PROGRAM                     |
++-----------------------------+------------------------+
+                              |
+                              v
+                 +--------------------------+
+                 | init_simplebgc()         |
+                 | - load SBGC library      |
+                 | - bgc_init(), motors on  |
+                 | - read baseline yaw/p/p  |
+                 +--------------------------+
+                              |
+                              v
+                 +--------------------------+
+                 | Init MediaPipe FaceMesh  |
+                 +--------------------------+
+                              |
+                              v
+                 +--------------------------+
+                 | Open camera              |
+                 | set frame_center_anchor  |
+                 | = (width/2, height/2)    |
+                 +--------------------------+
+                              |
+                              v
+              +--------------------------------+
+              |            MAIN LOOP           |
+              |   (runs until ESC pressed)     |
+              +--------------------------------+
+                              |
+                              v
+      +-----------------------------------------------------+
+      | 1. Capture frame from camera                        |
+      | 2. Run FaceMesh -> face_landmarks                   |
+      | 3. If no face:                                      |
+      |       - increment lost counter                      |
+      |       - if too many lost frames -> reset state      |
+      |       - print telemetry and display frame           |
+      |       - continue to next loop iteration             |
+      +-----------------------------------------------------+
+                              |
+                              v
+      +-----------------------------------------------------+
+      | 4. Compute mouth_centroid from landmarks (13,14,    |
+      |    61,291) and estimate face roll from 61->291      |
+      | 5. Smooth mouth_centroid via EMA -> smoothed_point  |
+      | 6. Build stable_box centered at frame_center_anchor |
+      | 7. Compute:                                         |
+      |       - is_inside_stable_box                        |
+      |       - normalized distance radial_norm             |
+      |       - angular_speed (deg/s) from motion           |
+      +-----------------------------------------------------+
+                              |
+                              v
+                  +----------------------------+
+                  | State machine on tracker   |
+                  | LOCKED vs SEEKING          |
+                  +----------------------------+
+                              |
+               +--------------+--------------+
+               |                             |
+         (LOCKED)                        (SEEKING)
+               |                             |
+               v                             v
+  +------------------------+    +------------------------------+
+  | LOCKED state:          |    | SEEKING state:               |
+  | - If smoothed point    |    | - Update history buffers     |
+  |   inside stable_box:   |    |   (pos_x, pos_y, velocity)   |
+  |     -> do nothing      |    | - Compute stability metrics  |
+  |                        |    |   (median speed, pos stddev) |
+  | - If smoothed point    |    | - If radial_norm <=          |
+  |   leaves stable_box:   |    |   CENTER_STOP_THRESHOLD_NORM |
+  |     -> switch state    |    |     -> set state=LOCKED      |
+  |        to SEEKING      |    |     -> clear histories       |
+  +------------------------+    |                              |
+                                | - Else (still off center):  |
+                                |     * Compute full angular  |
+                                |       offsets from center   |
+                                |       (full_delta_yaw/pitch)|
+                                |     * Compute roll delta    |
+                                |     * Apply axis signs      |
+                                |     * If:                   |
+                                |         - motion stable AND |
+                                |         - rate limit passed |
+                                |       -> send micro-step:   |
+                                |          delta = full_delta |
+                                |                  * fraction |
+                                |       -> clamp tiny steps   |
+                                |       -> update commanded   |
+                                |          yaw/pitch/roll     |
+                                |       -> send_or_log_       |
+                                |          gimbal_angles()    |
+                                +------------------------------+
+                              |
+                              v
+      +-----------------------------------------------------+
+      | 8. Print telemetry (time, dRoll, dPitch, dYaw,      |
+      |    state, radial_norm)                              |
+      | 9. Draw UI overlays:                                |
+      |       - stable box at center                        |
+      |       - crosshair at center                         |
+      |       - red dot at smoothed mouth centroid          |
+      |       - text: state, dR/dP/dY, radial_norm          |
+      | 10. Show OpenCV window, exit on ESC                 |
+      +-----------------------------------------------------+
+                              |
+                              v
+                    +--------------------+
+                    | End when user      |
+                    | presses ESC:       |
+                    | - Release camera   |
+                    | - Destroy windows  |
+                    +--------------------+
