@@ -7,18 +7,16 @@
 #   - SEEKING: while face is outside, compute an angular error from center
 #              and drive the gimbal back using smooth continuous setpoint streaming.
 #
-# Notes:
-#   - Stable box anchor is FIXED at the frame center (optical axis).
-#   - SEEKING stops when face is within STABLE_STOP_SEEKING_THRESHOLD
-#     of the center (normalized radial distance).
-#   - Gimbal commands are ZERO-BASED ABSOLUTE angles:
-#       * On startup, read board angles as baseline (POLL ONCE)
-#       * Software commands are relative to that baseline
-#       * Before sending, add baseline back to produce board-frame absolute angles
+# Key fix in this version:
+#   - Poll board angles ONCE at startup (retries + debug)
+#   - Initialize cmd_* to those angles so first send is a HOLD,
+#     avoiding the "first movement jumps wrong" bug.
 #
 # Transport:
-#   - SimpleBGC SerialAPI shim: bgc_control_angles(roll, pitch, yaw)
-#   - OPTIONAL shim function used here: bgc_get_angles(yaw*, pitch*, roll*) -> int (0=OK)
+#   - SimpleBGC SerialAPI shim:
+#       bgc_init()
+#       bgc_control_angles(roll, pitch, yaw)
+#       bgc_get_angles(&roll,&pitch,&yaw)   <-- required for this file
 # ==============================================================
 
 import os, sys, time, math, warnings, statistics, ctypes
@@ -160,76 +158,68 @@ class TimedHist:
 
 
 # ----------------------------------------------------------------------
-# SBGC shim bindings (ctypes) + zero-based baseline
+# SBGC shim bindings (ctypes)
 # ----------------------------------------------------------------------
 _bgc_lib = None
 _bgc_initialized = False
 
-_baseline_yaw_deg   = 0.0
-_baseline_pitch_deg = 0.0
-_baseline_roll_deg  = 0.0
-_baseline_valid = False  # do not send until we have a valid baseline
 
-
-def get_board_angles(retries=30, delay_s=0.05):
+def get_board_angles_debug(retries=30, delay_s=0.05):
     """
-    DEBUG VERSION (exactly what you asked for, used by the full code):
-      - prints why it fails (not initialized, symbol missing, rc codes)
-      - retries to avoid "first movement bug"
-    Returns (yaw, pitch, roll) floats on success, or None on failure.
+    Poll angles from the board via shim function:
+
+        int bgc_get_angles(float *roll, float *pitch, float *yaw)
+
+    Returns (roll,pitch,yaw) floats on success, else None.
+
+    This is *debuggy* on purpose: it prints symbol presence and rc codes.
     """
     global _bgc_lib, _bgc_initialized
 
     if TEST == 1:
+        print("# get_board_angles: TEST=1 -> returning 0,0,0")
         return (0.0, 0.0, 0.0)
 
     if _bgc_lib is None or not _bgc_initialized:
         print("# get_board_angles: lib not initialized")
         return None
 
-    # bgc_get_angles must be EXPORTED by your shim + present in libsimplebgc.so
     if not hasattr(_bgc_lib, "bgc_get_angles"):
         print("# get_board_angles: bgc_get_angles symbol NOT FOUND in libsimplebgc.so")
-        print("#   -> This usually means you rebuilt the .so without the updated shim,")
-        print("#      or the function name/signature doesn't match exactly.")
         return None
 
-    yaw = ctypes.c_float()
-    pitch = ctypes.c_float()
     roll = ctypes.c_float()
+    pitch = ctypes.c_float()
+    yaw = ctypes.c_float()
 
     last_rc = None
     for attempt in range(retries):
-        rc = _bgc_lib.bgc_get_angles(ctypes.byref(yaw), ctypes.byref(pitch), ctypes.byref(roll))
+        rc = _bgc_lib.bgc_get_angles(ctypes.byref(roll), ctypes.byref(pitch), ctypes.byref(yaw))
         last_rc = rc
+
         if rc == 0:
-            print(f"# get_board_angles: OK on attempt {attempt+1}")
-            return (float(yaw.value), float(pitch.value), float(roll.value))
+            r = float(roll.value)
+            p = float(pitch.value)
+            y = float(yaw.value)
+            print(f"# get_board_angles: OK on attempt {attempt+1} -> roll={r:.3f}, pitch={p:.3f}, yaw={y:.3f}")
+            return (r, p, y)
 
         if attempt < 5 or attempt == retries - 1:
             print(f"# get_board_angles: rc={rc} (attempt {attempt+1}/{retries})")
         time.sleep(delay_s)
 
     print(f"# get_board_angles: FAILED after {retries} attempts, last rc={last_rc}")
-    print("#   -> If rc is consistently non-zero, the board may not be ready yet,")
-    print("#      or the underlying SerialAPI config (port/baud) isn't matching your setup,")
-    print("#      or your shim's get-angles implementation is reading the wrong RTD field.")
     return None
 
 
 def init_sbgc():
-    """Load SBGC library, initialize board, and capture startup baseline angles."""
+    """Load SBGC library and initialize board."""
     global _bgc_lib, _bgc_initialized
-    global _baseline_yaw_deg, _baseline_pitch_deg, _baseline_roll_deg, _baseline_valid
 
     if TEST == 1:
         print("# TEST mode: not loading SBGC library.")
         _bgc_lib = None
         _bgc_initialized = False
-        _baseline_yaw_deg = 0.0
-        _baseline_pitch_deg = 0.0
-        _baseline_roll_deg = 0.0
-        _baseline_valid = True
         return
 
     try:
@@ -239,18 +229,17 @@ def init_sbgc():
         print(f"# ERROR loading {LIB_PATH}: {e}")
         _bgc_lib = None
         _bgc_initialized = False
-        _baseline_valid = False
         return
 
-    # Init function
+    # Required symbols
     _bgc_lib.bgc_init.argtypes = []
     _bgc_lib.bgc_init.restype = ctypes.c_int
 
-    # Control function: shim expects (roll, pitch, yaw)
+    # NOTE: shim expects (roll, pitch, yaw)
     _bgc_lib.bgc_control_angles.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
     _bgc_lib.bgc_control_angles.restype = ctypes.c_int
 
-    # Optional get-angles function: (yaw*, pitch*, roll*) -> int
+    # Optional (but we want it)
     if hasattr(_bgc_lib, "bgc_get_angles"):
         _bgc_lib.bgc_get_angles.argtypes = [
             ctypes.POINTER(ctypes.c_float),
@@ -258,48 +247,24 @@ def init_sbgc():
             ctypes.POINTER(ctypes.c_float),
         ]
         _bgc_lib.bgc_get_angles.restype = ctypes.c_int
-        print("# Found bgc_get_angles() in libsimplebgc.so")
-    else:
-        print("# NOTE: bgc_get_angles() NOT found in libsimplebgc.so (baseline poll will fail)")
 
     rc = _bgc_lib.bgc_init()
     if rc != 0:
         print(f"# ERROR: bgc_init() returned {rc}")
         _bgc_initialized = False
-        _baseline_valid = False
         return
 
     _bgc_initialized = True
-
-    # Poll baseline once (with retries). If it fails, we will NOT send until we can poll later.
-    angles = get_board_angles(retries=40, delay_s=0.05)
-    if angles is not None:
-        byaw, bpitch, broll = angles
-        _baseline_yaw_deg = byaw
-        _baseline_pitch_deg = bpitch
-        _baseline_roll_deg = broll
-        _baseline_valid = True
-        print("# Baseline angles captured from board (startup poll):")
-        print(f"#   yaw={_baseline_yaw_deg:.2f}, pitch={_baseline_pitch_deg:.2f}, roll={_baseline_roll_deg:.2f}")
-    else:
-        _baseline_valid = False
-        print("# WARN: Could not poll baseline angles at startup.")
-        print("#       We will retry lazily before the first send to prevent the 'first movement bug'.")
-
     print("# SBGC initialization complete.")
 
 
-def write_test_line(d_yaw, d_pitch, d_roll,
-                    abs_yaw, abs_pitch, abs_roll,
-                    board_yaw, board_pitch, board_roll):
+def write_test_line(abs_roll, abs_pitch, abs_yaw):
     """Log command attempts to TEST_LOG instead of moving gimbal."""
     try:
         with open(TEST_LOG, 'a', buffering=1) as f:
             f.write(
                 f"T={time.time():.3f} "
-                f"dR={d_roll:+.2f} dP={d_pitch:+.2f} dY={d_yaw:+.2f} | "
-                f"absR={abs_roll:+.2f} absP={abs_pitch:+.2f} absY={abs_yaw:+.2f} | "
-                f"boardR={board_roll:+.2f} boardP={board_pitch:+.2f} boardY={board_yaw:+.2f}\n"
+                f"cmdR={abs_roll:+.3f} cmdP={abs_pitch:+.3f} cmdY={abs_yaw:+.3f}\n"
             )
             f.flush()
             os.fsync(f.fileno())
@@ -309,61 +274,21 @@ def write_test_line(d_yaw, d_pitch, d_roll,
         return False
 
 
-def ensure_baseline():
+def send_or_log_angles(abs_roll_deg, abs_pitch_deg, abs_yaw_deg):
     """
-    Ensure baseline is valid before any send.
-    If not valid, poll now (with debug prints) and only proceed if success.
+    Send absolute angles (roll,pitch,yaw) to gimbal, or log if TEST=1.
     """
-    global _baseline_yaw_deg, _baseline_pitch_deg, _baseline_roll_deg, _baseline_valid
-
-    if _baseline_valid:
-        return True
-
-    print("# ensure_baseline: baseline not valid yet, attempting poll now...")
-    angles = get_board_angles(retries=60, delay_s=0.05)
-    if angles is None:
-        print("# ensure_baseline: still FAILED -> will skip sending this cycle")
-        return False
-
-    byaw, bpitch, broll = angles
-    _baseline_yaw_deg = byaw
-    _baseline_pitch_deg = bpitch
-    _baseline_roll_deg = broll
-    _baseline_valid = True
-
-    print("# Baseline angles captured (lazy poll before first send):")
-    print(f"#   yaw={_baseline_yaw_deg:.2f}, pitch={_baseline_pitch_deg:.2f}, roll={_baseline_roll_deg:.2f}")
-    return True
-
-
-def send_or_log_angles(d_yaw_deg, d_pitch_deg, d_roll_deg,
-                       abs_yaw_deg, abs_pitch_deg, abs_roll_deg):
-    """
-    Send absolute angles to gimbal (board frame), or log if TEST=1.
-    Converts software zero-based absolute angles to board absolute angles by adding baseline.
-    """
-    if TEST != 1:
-        # Prevent first movement bug: never send if baseline isn't real yet.
-        if not ensure_baseline():
-            return False
-
-    board_yaw   = _baseline_yaw_deg   + abs_yaw_deg
-    board_pitch = _baseline_pitch_deg + abs_pitch_deg
-    board_roll  = _baseline_roll_deg  + abs_roll_deg
-
     if TEST == 1:
-        return write_test_line(d_yaw_deg, d_pitch_deg, d_roll_deg,
-                               abs_yaw_deg, abs_pitch_deg, abs_roll_deg,
-                               board_yaw, board_pitch, board_roll)
+        return write_test_line(abs_roll_deg, abs_pitch_deg, abs_yaw_deg)
 
     if _bgc_lib is None or not _bgc_initialized:
         print("# ERROR: SBGC shim not initialized.")
         return False
 
     rc = _bgc_lib.bgc_control_angles(
-        ctypes.c_float(board_roll),
-        ctypes.c_float(board_pitch),
-        ctypes.c_float(board_yaw),
+        ctypes.c_float(abs_roll_deg),
+        ctypes.c_float(abs_pitch_deg),
+        ctypes.c_float(abs_yaw_deg),
     )
     if rc != 0:
         print(f"# SEND_ERROR: bgc_control_angles() returned {rc}")
@@ -396,6 +321,33 @@ def main():
     except Exception:
         pass
 
+    # ------------------------------------------------------------------
+    # NEW: one-shot poll of board angles to initialize command state
+    # ------------------------------------------------------------------
+    initial_angles = get_board_angles_debug(retries=40, delay_s=0.05)
+    if initial_angles is None:
+        print("# WARNING: Could not poll angles from board.")
+        print("#          Tracker will still run, but first movement may jump if")
+        print("#          your gimbal is NOT already at (0,0,0) in the board's angle frame.")
+        init_roll = 0.0
+        init_pitch = 0.0
+        init_yaw = 0.0
+    else:
+        init_roll, init_pitch, init_yaw = initial_angles
+
+        # If you're *always* getting zeros, that may be normal for frame-referenced angles.
+        # Still useful: it makes the first command a HOLD(0,0,0) instead of a random jump.
+        if abs(init_roll) < 1e-3 and abs(init_pitch) < 1e-3 and abs(init_yaw) < 1e-3:
+            print("# NOTE: Polled angles are ~0,0,0.")
+            print("#       This can be normal if the board reports stabilized camera angles.")
+            print("#       If you need motor/encoder positions, you must read different RT data fields.")
+
+    # Soft-start: send one hold command immediately (optional but helps)
+    if TEST != 1:
+        print(f"# Sending initial HOLD: roll={init_roll:.3f} pitch={init_pitch:.3f} yaw={init_yaw:.3f}")
+        send_or_log_angles(init_roll, init_pitch, init_yaw)
+        time.sleep(0.05)
+
     t0 = time.time()
     prev_smoothed = None
     prev_time = None
@@ -403,15 +355,15 @@ def main():
 
     anchor = None  # fixed at frame center
 
-    # Software-frame absolute commands (relative to baseline)
-    cmd_roll = 0.0
-    cmd_pitch = 0.0
-    cmd_yaw = 0.0
+    # Software-frame absolute commands (initialize to board angles to avoid first jump)
+    cmd_roll = init_roll
+    cmd_pitch = init_pitch
+    cmd_yaw = init_yaw
 
     # Smoothed command outputs
-    smooth_cmd_roll = None
-    smooth_cmd_pitch = None
-    smooth_cmd_yaw = None
+    smooth_cmd_roll = init_roll
+    smooth_cmd_pitch = init_pitch
+    smooth_cmd_yaw = init_yaw
 
     LOCKED, SEEKING = 0, 1
     state = LOCKED
@@ -422,7 +374,7 @@ def main():
 
     last_send_time = 0.0
 
-    print("# T dR dP dY sent state radial_norm baseline_valid")
+    print("# T dR dP dY sent state radial_norm")
 
     while True:
         ok, frame = cap.read()
@@ -526,50 +478,39 @@ def main():
         sent = 0
 
         if state == SEEKING and not too_wild:
-            # Full error from center -> angular error
             full_d_yaw, full_d_pitch = pixels_to_deg(dx_center, dy_center, w, h, FOV_H_DEG, FOV_V_DEG)
 
-            # Apply axis sign conventions
             full_d_yaw   *= AXIS_SIGN["yaw"]
             full_d_pitch *= AXIS_SIGN["pitch"]
 
-            # Micro-step is fraction of error
             d_yaw = clamp(full_d_yaw * STEP_FRACTION,       -MAX_STEP_DEG_YAW,   +MAX_STEP_DEG_YAW)
             d_pitch = clamp(full_d_pitch * STEP_FRACTION,   -MAX_STEP_DEG_PITCH, +MAX_STEP_DEG_PITCH)
 
-            # Roll disabled
+            # Roll disabled in this tracker
             d_roll = 0.0
 
-            # Minimum thresholds
             if abs(d_yaw)   < MIN_STEP_DEG_YAW:   d_yaw = 0.0
             if abs(d_pitch) < MIN_STEP_DEG_PITCH: d_pitch = 0.0
             if abs(d_roll)  < MIN_STEP_DEG_ROLL:  d_roll = 0.0
 
-            # Update target absolute commands (software frame)
             cmd_yaw   += d_yaw
             cmd_pitch += d_pitch
             cmd_roll  += d_roll
 
         # --- Fixed-rate streaming ---
         if (now - last_send_time) >= COMMAND_PERIOD:
-            # Smooth absolute commands before sending
             smooth_cmd_yaw   = ema_scalar(cmd_yaw,   smooth_cmd_yaw,   CMD_ANGLE_EMA_ALPHA)
             smooth_cmd_pitch = ema_scalar(cmd_pitch, smooth_cmd_pitch, CMD_ANGLE_EMA_ALPHA)
             smooth_cmd_roll  = ema_scalar(cmd_roll,  smooth_cmd_roll,  CMD_ANGLE_EMA_ALPHA)
 
-            ok_send = send_or_log_angles(
-                0.0, 0.0, 0.0,
-                smooth_cmd_yaw, smooth_cmd_pitch, smooth_cmd_roll
-            )
+            ok_send = send_or_log_angles(smooth_cmd_roll, smooth_cmd_pitch, smooth_cmd_yaw)
             if ok_send:
                 last_send_time = now
                 sent = 1
 
-        # Telemetry
         T = now - t0
-        print(f"{T:.3f} {d_roll:+.3f} {d_pitch:+.3f} {d_yaw:+.3f} {sent} {state} r={radial_norm:.3f} baseline={int(_baseline_valid)}")
+        print(f"{T:.3f} {d_roll:+.3f} {d_pitch:+.3f} {d_yaw:+.3f} {sent} {state} r={radial_norm:.3f}")
 
-        # UI
         if DRAW:
             l, t_, r, b = map(int, box)
             cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
@@ -580,7 +521,7 @@ def main():
             state_txt = "LOCKED" if state == LOCKED else "SEEKING"
             cv2.putText(frame, f"state:{state_txt}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
-            cv2.putText(frame, f"r={radial_norm:.3f} baseline={int(_baseline_valid)}", (10, 48),
+            cv2.putText(frame, f"r={radial_norm:.3f}", (10, 48),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
 
             cv2.imshow("Centroid Tracker (Option 1)", frame)
