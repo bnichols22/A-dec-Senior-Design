@@ -83,7 +83,7 @@ int bgc_get_angles(float *pitch_deg_out, float *yaw_deg_out)
     sbgcCommandStatus_t st;
 
     if (!pitch_deg_out || !yaw_deg_out)
-        return (int)sbgcCOMMAND_PARAM_ERROR;
+        return (int)sbgcCOMMAND_RX_ERROR;
 
     memset(&rtd, 0, sizeof(rtd));
 
