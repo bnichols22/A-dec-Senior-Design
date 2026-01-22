@@ -9,6 +9,7 @@ static sbgcGeneral_t       gSBGC;
 static sbgcControl_t       gCtrl;
 static sbgcControlConfig_t gCtrlCfg;
 static sbgcConfirm_t       gConfirm;
+static sbgcRealTimeData_t  RealTimeData;
 
 int bgc_init(void)
 {
@@ -79,7 +80,6 @@ int bgc_control_angles(float pitch_deg, float yaw_deg)
  */
 int bgc_get_angles(float *pitch_deg_out, float *yaw_deg_out)
 {
-    sbgcRealTimeData_t rtd;
     sbgcCommandStatus_t st;
 
     if (!pitch_deg_out || !yaw_deg_out)
