@@ -147,7 +147,24 @@ def main():
         if hasattr(lib, "bgc_deinit"):
             lib.bgc_deinit()
         sys.exit(3)
+        
+    print("# Polling angles once ...")
+    angles = get_angles_once(lib)
+    if angles is None:
+        print("# ERROR: Could not poll angles.")
+        if hasattr(lib, "bgc_deinit"):
+            lib.bgc_deinit()
+        sys.exit(3)
+        
+    print("# Polling angles once ...")
+    angles = get_angles_once(lib)
+    if angles is None:
+        print("# ERROR: Could not poll angles.")
+        if hasattr(lib, "bgc_deinit"):
+            lib.bgc_deinit()
+        sys.exit(3)
 
+    
     yaw, pitch, roll = angles
     print("# -------------------")
     print(f"# YAW   = {yaw:.2f} deg")
