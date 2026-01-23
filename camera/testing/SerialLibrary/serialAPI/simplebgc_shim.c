@@ -1,5 +1,6 @@
 // simplebgc_shim.c
-// Basic working shim + angle readback (pitch,yaw order preserved)
+// Minimal shim to read CURRENT camera angles (roll, pitch, yaw)
+// Uses the SAME method as the official SimpleBGC example
 
 #include <string.h>
 #include <stdint.h>
@@ -9,8 +10,10 @@ static sbgcGeneral_t       gSBGC;
 static sbgcControl_t       gCtrl;
 static sbgcControlConfig_t gCtrlCfg;
 static sbgcConfirm_t       gConfirm;
-static sbgcRealTimeData_t  RealTimeData;
 
+/* -------------------------------------------------- */
+/* Init */
+/* -------------------------------------------------- */
 int bgc_init(void)
 {
     sbgcCommandStatus_t st;
@@ -33,70 +36,53 @@ int bgc_init(void)
         return (int)st;
 
     memset(&gCtrl, 0, sizeof(gCtrl));
-
     gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
-
-    gCtrl.AxisC[PITCH].angle = 0;
-    gCtrl.AxisC[YAW].angle   = 0;
 
     gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(25.0f);
     gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(50.0f);
 
+    /* Turn motors ON (important!) */
     st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
     return (int)st;
 }
 
-int bgc_set_motors(int on)
+/* -------------------------------------------------- */
+/* ONE-SHOT ANGLE POLL (THIS IS THE IMPORTANT PART) */
+/* -------------------------------------------------- */
+int bgc_get_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
 {
+    sbgcRealTimeData_t rtd;
     sbgcCommandStatus_t st;
 
-    if (on)
-        st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
-    else
-        st = SBGC32_SetMotorsOFF(&gSBGC, 0, &gConfirm);
-
-    return (int)st;
-}
-
-int bgc_control_angles(float pitch_deg, float yaw_deg)
-{
-    // IMPORTANT FIX:
-    // You were previously using sbgcAngleToDegree() here (backwards).
-    // Command requires: degrees -> internal angle units.
-    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(pitch_deg);
-    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(yaw_deg);
-
-    return (int)SBGC32_Control(&gSBGC, &gCtrl);
-}
-
-/**
- * Read current gimbal angles from the board.
- * Output order matches the rest of the shim: (pitch, yaw).
- *
- * @param pitch_deg_out pointer to store pitch in degrees (required)
- * @param yaw_deg_out   pointer to store yaw in degrees (required)
- * @return 0 on success, otherwise SBGC status code
- */
-int bgc_get_angles(float *pitch_deg_out, float *yaw_deg_out)
-{
-    sbgcCommandStatus_t st;
-
-    if (!pitch_deg_out || !yaw_deg_out)
+    if (!roll_deg || !pitch_deg || !yaw_deg)
         return (int)sbgcCOMMAND_RX_ERROR;
 
     memset(&rtd, 0, sizeof(rtd));
 
-    // One-shot read of realtime data (includes frameCamAngle[])
+    /* EXACTLY like the official example */
     st = SBGC32_ReadRealTimeData4(&gSBGC, &rtd);
     if (st != sbgcCOMMAND_OK)
         return (int)st;
 
-    // Convert internal angle units -> degrees
-    *pitch_deg_out = sbgcAngleToDegree(rtd.frameCamAngle[PITCH]);
-    *yaw_deg_out   = sbgcAngleToDegree(rtd.frameCamAngle[YAW]);
+    /* Convert controller units → degrees */
+    *roll_deg  = sbgcAngleToDegree(rtd.frameCamAngle[ROLL]);
+    *pitch_deg = sbgcAngleToDegree(rtd.frameCamAngle[PITCH]);
+    *yaw_deg   = sbgcAngleToDegree(rtd.frameCamAngle[YAW]);
 
     return 0;
+}
+
+/* -------------------------------------------------- */
+/* Command angles (unchanged) */
+/* -------------------------------------------------- */
+int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
+{
+    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(roll_deg);
+    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(pitch_deg);
+    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(yaw_deg);
+
+    return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
 
 void bgc_deinit(void)
