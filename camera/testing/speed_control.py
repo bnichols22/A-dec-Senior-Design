@@ -41,8 +41,8 @@ POS_STD_THRESH_PX = 2.5
 
 # SPEED controller tuning:
 # Convert "deg error" -> "deg/s command" with gain KP.
-KP_YAW_DPS_PER_DEG   = 1.5
-KP_PITCH_DPS_PER_DEG = 1.5
+KP_YAW_DPS_PER_DEG   = 1.25
+KP_PITCH_DPS_PER_DEG = 1.25
 
 # Limits on commanded speeds (deg/s)
 MAX_DPS_YAW   = 80.0
