@@ -45,16 +45,16 @@ KP_YAW_DPS_PER_DEG   = 2.0
 KP_PITCH_DPS_PER_DEG = 2.0
 
 # Limits on commanded speeds (deg/s)
-MAX_DPS_YAW   = 60.0
-MAX_DPS_PITCH = 60.0
-MAX_DPS_ROLL  = 40.0
+MAX_DPS_YAW   = 80.0
+MAX_DPS_PITCH = 80.0
+MAX_DPS_ROLL  = 60.0
 
 # Deadband (deg error) to avoid micro-jitter
 DEADBAND_DEG_YAW   = 0.25
 DEADBAND_DEG_PITCH = 0.25
 
 # Command streaming rate (Hz)
-COMMAND_HZ = 60.0
+COMMAND_HZ =100.0
 COMMAND_PERIOD = 1.0 / COMMAND_HZ
 
 # Smooth commanded speeds
