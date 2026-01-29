@@ -48,13 +48,13 @@ FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
 # Stable box: fraction of HALF-frame sizes
-STABLE_SCALAR   = 0.06    # tighten to 0.05 or 0.04 if too tolerant
+STABLE_SCALAR   = 0.05    # tighten to 0.05 or 0.04 if too tolerant
 WINDOW_SEC      = 0.6     # history window for stability metrics
 
 # How close to center is "good enough" to stop SEEKING
 # This is a normalized radial distance in [0,1]:
 #   0.05 means the distance from center is <= 5% of half-frame (roughly).
-STABLE_STOP_SEEKING_THRESHOLD = 0.025
+STABLE_STOP_SEEKING_THRESHOLD = 0.01
 
 # Stability gates (used in SEEKING — only send steps when motion isn't crazy)
 VEL_THRESH_DEG_S  = 2.5   # median angular speed threshold
@@ -62,7 +62,7 @@ POS_STD_THRESH_PX = 2.5   # positional stddev threshold
 
 # Micro-step control:
 # We move only this fraction of the *full* offset per command.
-STEP_FRACTION = 0.15       # 20% of the distance per step (tune 0.1–0.3)
+STEP_FRACTION = 0.20       # 20% of the distance per step (tune 0.1–0.3)
 
 # Send gating
 SEND_TIME_LIMITER = 0.085  # min seconds between sends (rate limit, faster for micro-steps)

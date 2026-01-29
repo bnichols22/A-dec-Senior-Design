@@ -1,6 +1,7 @@
 // simplebgc_shim.c
 // Minimal shim around SimpleBGC SerialAPI for use from Python (ctypes).
-// Now supports ROLL + PITCH + YAW absolute angle control.
+// Supports absolute ANGLE control (existing) + SPEED control (new).
+// SPEED control avoids the initial "jump to 0" bug because it never commands an absolute angle.
 
 #include <string.h>
 #include <stdint.h>
@@ -11,15 +12,10 @@ static sbgcControl_t       gCtrl;
 static sbgcControlConfig_t gCtrlCfg;
 static sbgcConfirm_t       gConfirm;
 
-/*
- * Initialize SerialAPI, basic control config, and motors ON.
- * Returns 0 on success, or a sbgcCommandStatus_t code on error.
- */
 int bgc_init(void)
 {
     sbgcCommandStatus_t st;
 
-    // Initialize the library + Linux driver (uses SBGC_SERIAL_PORT from serialAPI_Config.h)
     st = SBGC32_Init(&gSBGC);
     if (st != sbgcCOMMAND_OK)
         return (int)st;
@@ -27,7 +23,6 @@ int bgc_init(void)
     // ----- ControlConfig -----
     memset(&gCtrlCfg, 0, sizeof(gCtrlCfg));
 
-    // Enable LPF on all three axes (ROLL, PITCH, YAW)
     gCtrlCfg.AxisCCtrl[ROLL].angleLPF  = 2;
     gCtrlCfg.AxisCCtrl[PITCH].angleLPF = 2;
     gCtrlCfg.AxisCCtrl[YAW].angleLPF   = 2;
@@ -36,7 +31,6 @@ int bgc_init(void)
     gCtrlCfg.AxisCCtrl[PITCH].speedLPF = 2;
     gCtrlCfg.AxisCCtrl[YAW].speedLPF   = 2;
 
-    // Don't require CMD_CONFIRM back for each control command
     gCtrlCfg.flags = CtrlCONFIG_FLAG_NO_CONFIRM;
 
     st = SBGC32_ControlConfig(&gSBGC, &gCtrlCfg, &gConfirm);
@@ -46,29 +40,24 @@ int bgc_init(void)
     // ----- Control object -----
     memset(&gCtrl, 0, sizeof(gCtrl));
 
-    // Angle-control, “target precise” on ROLL, PITCH, YAW
+    // Default to ANGLE mode (your existing behavior).
     gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
 
-    // Start at 0 deg on all axes
+    // Start targets at 0 (but NOTE: gimbal will not move until you call Control)
     gCtrl.AxisC[ROLL].angle  = sbgcAngleToDegree(0);
     gCtrl.AxisC[PITCH].angle = sbgcAngleToDegree(0);
     gCtrl.AxisC[YAW].angle   = sbgcAngleToDegree(0);
 
-    // Reasonable speeds (deg/s → internal units)
     gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(25.0f);
     gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(25.0f);
     gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(50.0f);
 
-    // Turn motors on
     st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
     return (int)st;
 }
 
-/*
- * Turn motors on (on=1) or off (on=0).
- */
 int bgc_set_motors(int on)
 {
     sbgcCommandStatus_t st;
@@ -81,14 +70,15 @@ int bgc_set_motors(int on)
     return (int)st;
 }
 
-/*
- * Set absolute angles (in degrees) for all three axes.
- * roll_deg, pitch_deg, yaw_deg are in mechanical degrees.
- */
+// Existing absolute-angle control (kept exactly in spirit).
 int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
 {
-    // SimpleBGC expects 'angle' field in its internal "degree units"
-    // (1 LSB ≈ 0.02197 deg). sbgcAngleToDegree() converts from degrees → internal.
+    // NOTE: This naming in the vendor lib is confusing, but your demo uses sbgcAngleToDegree(x_degrees)
+    // for degree->internal conversion, so we keep it consistent with that style.
+    gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+    gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+    gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
+
     gCtrl.AxisC[ROLL].angle  = sbgcAngleToDegree((int16_t)roll_deg);
     gCtrl.AxisC[PITCH].angle = sbgcAngleToDegree((int16_t)pitch_deg);
     gCtrl.AxisC[YAW].angle   = sbgcAngleToDegree((int16_t)yaw_deg);
@@ -96,9 +86,25 @@ int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
     return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
 
-/*
- * Deinit and close serial port.
+/**
+ * NEW: Speed control in deg/sec for all three axes.
+ * This avoids the startup snap-to-zero bug because we never command an absolute angle.
+ *
+ * roll_dps / pitch_dps / yaw_dps are in degrees per second.
  */
+int bgc_control_speeds(float roll_dps, float pitch_dps, float yaw_dps)
+{
+    gCtrl.mode[ROLL]  = CtrlMODE_SPEED;
+    gCtrl.mode[PITCH] = CtrlMODE_SPEED;
+    gCtrl.mode[YAW]   = CtrlMODE_SPEED;
+
+    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(roll_dps);
+    gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(pitch_dps);
+    gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(yaw_dps);
+
+    return (int)SBGC32_Control(&gSBGC, &gCtrl);
+}
+
 void bgc_deinit(void)
 {
     SBGC32_Deinit(&gSBGC);

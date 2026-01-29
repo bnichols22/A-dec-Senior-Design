@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "/home/ohansen22/senior_design/A-dec-Senior-Design/camera/testing/micro_movement_full_track.py", line 561, in <module>
-    main()
-  File "/home/ohansen22/senior_design/A-dec-Senior-Design/camera/testing/micro_movement_full_track.py", line 553, in main
-    if cv2.waitKey(1) & 0xFF == 27:
-KeyboardInterrupt
