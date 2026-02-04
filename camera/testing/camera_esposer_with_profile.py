@@ -4,7 +4,7 @@ import json
 import os
 
 # --- Configuration ---
-PROFILE_FILENAME = "webcam_profile.json"
+PROFILE_FILENAME = input("Enter profile file name to write to: ")
 
 # Default state used if no profile is loaded
 settings = {
@@ -103,7 +103,8 @@ while(True):
 
     # LOAD PROFILE
     if key == ord('o') or key == ord('O'):
-        new_settings = load_profile(PROFILE_FILENAME)
+        profile_to_load = input("Enter name of profile to load: ")
+        new_settings = load_profile(profile_to_load)
         if new_settings:
             settings = new_settings
             # If the loaded profile has a different camera ID, we might want to switch
