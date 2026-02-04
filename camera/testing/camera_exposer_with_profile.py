@@ -4,7 +4,7 @@ import json
 import os
 
 # --- Configuration ---
-PROFILE_FILENAME = input("Enter profile file name to write to: ")
+
 
 # Default state used if no profile is loaded
 settings = {
@@ -99,7 +99,8 @@ while(True):
     
     # SAVE PROFILE
     if key == ord('p') or key == ord('P'):
-        save_profile(settings, PROFILE_FILENAME)
+        profile_write = input("Enter profile file name to write to: ")
+        save_profile(settings, profile_write)
 
     # LOAD PROFILE
     if key == ord('o') or key == ord('O'):
