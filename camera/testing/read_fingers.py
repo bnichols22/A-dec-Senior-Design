@@ -24,6 +24,8 @@ with mp_hands.Hands(
         if not success:
             print("Ignoring empty camera frame.")
             continue
+        
+        image = cv2.flip(image, 1)
 
         # Performance optimization: Mark as not writeable
         image.flags.writeable = False
@@ -57,11 +59,11 @@ with mp_hands.Hands(
                 
                 # Depending on Left/Right hand, the "open" direction is different
                 if hand_label == "Left": 
-                    # For a Left hand, thumb opens to the RIGHT side of the hand (in the image)
+                    # For a Left hand, thumb opens to the Left side of the hand (in the image)
                     if thumb_tip_x > thumb_ip_x:
                         hand_fingers.append("Thumb")
-                else: # Right Hand
-                    # For a Right hand, thumb opens to the LEFT side of the hand (in the image)
+                else: # Left Hand
+                    # For a Left hand, thumb opens to the Right side of the hand (in the image)
                     if thumb_tip_x < thumb_ip_x:
                         hand_fingers.append("Thumb")
 
@@ -91,6 +93,7 @@ with mp_hands.Hands(
 
                 # --- DISPLAY TEXT ---
                 # Calculate position for text based on hand bounding box or fixed
+                
                 text_y = 50 + (hand_idx * 50)
                 fingers_str = ", ".join(hand_fingers)
                 
@@ -103,7 +106,9 @@ with mp_hands.Hands(
                             2)
 
         # Flip the image horizontally for a selfie-view display
-        cv2.imshow('MediaPipe Hands', cv2.flip(image, 1))
+        cv2.imshow('MediaPipe Hands', image)
+        
+    
         
         if cv2.waitKey(5) & 0xFF == 27:
             break
