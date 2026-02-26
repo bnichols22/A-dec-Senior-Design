@@ -1,0 +1,4 @@
+gcc main.c ../../serialAPI/*.c ../../serialAPI/*/*.c \
+-I../../serialAPI \
+-lpthread \
+-o DEMO
