@@ -6,7 +6,7 @@
  *	____________________________________________________________________
  */
 
-#include "sbgc32.h"
+#include "/home/ohansen22/senior_design/A-dec-Senior-Design/gimbal/serial_API_BoardExamples/serialAPI/sbgc32.h"
 
 
 #define		SBGC_CONTROL_AXES_LPF			2

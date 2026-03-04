@@ -17,15 +17,17 @@ import cv2
 import mediapipe as mp
 from collections import deque
 
-# --------- Paths ----------
+# --------- Paths + Filename ----------
+file_name = "speed_control.py"
 BASE_DIR = os.path.expanduser('~/senior_design/A-dec-Senior-Design/camera/testing')
 os.makedirs(BASE_DIR, exist_ok=True)
 
 LOG_PATH  = os.path.join(BASE_DIR, 'face_track_log.txt')
 TEST_LOG  = os.path.join(BASE_DIR, 'Board_Serial_Command_Test.txt')
 
-print(f"# ADEC BASE_DIR = {BASE_DIR}")
-print(f"# ADEC TEST_LOG = {TEST_LOG}")
+LIB_PATH = os.path.expanduser(
+    "~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI/libsimplebgc.so"
+)
 
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
@@ -39,8 +41,8 @@ STABLE_STOP_SEEKING_THRESHOLD = 0.025
 VEL_THRESH_DEG_S  = 2.5
 POS_STD_THRESH_PX = 2.5
 
-# SPEED controller tuning:
-# Convert "deg error" -> "deg/s command" with gain KP.
+# Speed controller tuning
+# Convert deg error to deg/s command with gain KP.
 KP_YAW_DPS_PER_DEG   = 1.25
 KP_PITCH_DPS_PER_DEG = 1.25
 
@@ -57,26 +59,27 @@ DEADBAND_DEG_PITCH = 0.25
 COMMAND_HZ = 150.0
 COMMAND_PERIOD = 1.0 / COMMAND_HZ
 
-# Smooth commanded speeds
-CMD_SPEED_EMA_ALPHA = 0.35  # 0=no smoothing, 1=very slow
+# Smooth commanded speeds (0=no smoothing, 1=very slow)
+CMD_SPEED_EMA_ALPHA = 0.35  # 
 
+# Axis sign values (trying to keep them all + for ease of conceptualization)
 AXIS_SIGN = {"yaw": 1, "pitch": 1, "roll": 1}
 
-TEST = 0  # 1=log only; 0=send to gimbal
-LIB_PATH = os.path.expanduser(
-    "~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI/libsimplebgc.so"
-)
+# Capture vars
+MAX_STORED_FRAMES = 1
 
+# Other vars
 DRAW = True
 SMOOTH_ALPHA = 0.25
 MAX_LOST_FRAMES = 10
 
+# Environment logging stuff
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 warnings.filterwarnings("ignore")
-sys.stderr = open(LOG_PATH, "w")
 
 
-# ---------------- Utilities ----------------
+# ---------------- Helper Functions ----------------
+
 def ema_point(curr, prev, alpha):
     if prev is None:
         return curr
@@ -91,8 +94,8 @@ def ema_scalar(curr, prev, alpha):
 def clamp(val, lo, hi):
     return max(lo, min(hi, val))
 
-def pixels_to_deg(dx_px, dy_px, w, h, fov_h, fov_v):
-    half_w, half_h = w / 2.0, h / 2.0
+def pixels_to_deg(dx_px, dy_px, frame_width, frame_height, fov_h, fov_v):
+    half_w, half_h = frame_width / 2.0, frame_height / 2.0
     yaw_deg   = (dx_px / half_w) * (fov_h / 2.0)
     pitch_deg = (dy_px / half_h) * (fov_v / 2.0)
     return yaw_deg, pitch_deg
@@ -100,10 +103,10 @@ def pixels_to_deg(dx_px, dy_px, w, h, fov_h, fov_v):
 def angle_deg(p1, p2):
     return math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0]))
 
-def build_stable_box(center_xy, w, h, scalar):
+def build_stable_box(center_xy, frame_width, frame_height, scalar):
     cx, cy = center_xy
-    half_w = scalar * (w / 2.0)
-    half_h = scalar * (h / 2.0)
+    half_w = scalar * (frame_width / 2.0)
+    half_h = scalar * (frame_height / 2.0)
     return (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
 
 def inside_box(pt, box):
@@ -141,17 +144,12 @@ _bgc_initialized = False
 def init_sbgc():
     global _bgc_lib, _bgc_initialized
 
-    if TEST == 1:
-        print("# TEST mode: not loading SBGC library.")
-        _bgc_lib = None
-        _bgc_initialized = False
-        return
-
     try:
         _bgc_lib = ctypes.CDLL(LIB_PATH)
-        print(f"# Loaded SBGC library from {LIB_PATH}")
+        print(f"Loaded SBGC library from {LIB_PATH}")
     except OSError as e:
-        print(f"# ERROR loading {LIB_PATH}: {e}")
+        # Return w/ Error code if we cannot open the .so
+        print(f"init_sbgc: error loading {LIB_PATH}: {e}")
         _bgc_lib = None
         _bgc_initialized = False
         return
@@ -159,45 +157,31 @@ def init_sbgc():
     _bgc_lib.bgc_init.argtypes = []
     _bgc_lib.bgc_init.restype = ctypes.c_int
 
-    # NEW: speed control
-    if not hasattr(_bgc_lib, "bgc_control_speeds"):
-        print("# ERROR: libsimplebgc.so does not export bgc_control_speeds(). Rebuild the .so.")
-        _bgc_initialized = False
-        return
-
     _bgc_lib.bgc_control_speeds.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
     _bgc_lib.bgc_control_speeds.restype = ctypes.c_int
 
-    rc = _bgc_lib.bgc_init()
-    if rc != 0:
-        print(f"# ERROR: bgc_init() returned {rc}")
+    status_code = _bgc_lib.bgc_init()
+    if status_code != 0:
+        print(f"init_sbgc: error bgc_init() returned {status_code}")
         _bgc_initialized = False
         return
 
     _bgc_initialized = True
-    print("# SBGC init OK (SPEED-mode tracker, no baseline needed).")
+    print("Initialized the library")
 
-def send_or_log_speeds(roll_dps, pitch_dps, yaw_dps):
-    if TEST == 1:
-        try:
-            with open(TEST_LOG, 'a', buffering=1) as f:
-                f.write(f"T={time.time():.3f} roll_dps={roll_dps:+.2f} pitch_dps={pitch_dps:+.2f} yaw_dps={yaw_dps:+.2f}\n")
-            return True
-        except Exception as e:
-            print(f"# TEST_FILE_ERROR: {e}")
-            return False
-
+def send_speeds(roll_dps, pitch_dps, yaw_dps):
     if _bgc_lib is None or not _bgc_initialized:
-        print("# ERROR: SBGC shim not initialized.")
+        print("send_speeds: cannot send because lib is not initialied or setup")
         return False
 
-    rc = _bgc_lib.bgc_control_speeds(
+    # send the speeds to the motors
+    status_code = _bgc_lib.bgc_control_speeds(
         ctypes.c_float(roll_dps),
         ctypes.c_float(pitch_dps),
         ctypes.c_float(yaw_dps),
     )
-    if rc != 0:
-        print(f"# SEND_ERROR: bgc_control_speeds() returned {rc}")
+    if status_code != 0:
+        print(f"send_speeds: bgc_control_speeds: bgc_control_speeds() returned {status_code}, non-zero status fail")
         return False
 
     return True
@@ -205,35 +189,46 @@ def send_or_log_speeds(roll_dps, pitch_dps, yaw_dps):
 
 # ---------------- Main loop ----------------
 def main():
+
+    # ======= Setup =======
     init_sbgc()
 
     mp_face_mesh = mp.solutions.face_mesh
+    # Can adjust confidence as and detection as needed
     face_mesh = mp_face_mesh.FaceMesh(
         static_image_mode=False, max_num_faces=1, refine_landmarks=True,
         min_detection_confidence=0.5, min_tracking_confidence=0.5
     )
 
-    cap = cv2.VideoCapture(CAM_INDEX)
-    if not cap.isOpened():
-        print("ERROR: Unable to open camera", CAM_INDEX)
+    # Create capture device object and verify it constructed
+    capture_dev = cv2.VideoCapture(CAM_INDEX)
+    if not capture_dev.isOpened():
+        print(f'main: Error Unable to open camera from {CAM_INDEX}')
+        # Exit here because we cannot run without camera
         sys.exit(1)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    
+    # Set the max number of stored frames allowed
+    capture_dev.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
 
     # Clear test log
     try:
-        with open(TEST_LOG, "w") as f:
-            f.write("# SimpleBGC commands (SPEED mode) — fresh run\n")
-            f.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        with open(LOG_PATH, "w") as log_file:
+            log_file.write(f"Filename: {file_name}\n")
+            log_file.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            log_file.write(f"--------------------------------------------------------")
+        sys.stderr = log_file
     except Exception:
+        print("Unable to open log file")
         pass
 
-    t0 = time.time()
+    initial_time = time.time()
     prev_smoothed = None
     prev_time = None
     lost = 0
 
     anchor = None
 
+    # State names
     LOCKED, SEEKING = 0, 1
     state = LOCKED
 
@@ -248,19 +243,18 @@ def main():
     smooth_pitch_dps = None
     smooth_roll_dps = None
 
-    print("# T yaw_dps pitch_dps sent state r")
-
+    # ======= Main Loop =======
     while True:
-        ok, frame = cap.read()
+        ok, frame = capture_dev.read()
         if not ok:
-            print("# WARN: frame grab failed")
+            log_file.write(f"main: frame grab failed\n")
             break
 
         now = time.time()
-        h, w = frame.shape[:2]
+        frame_height, frame_width = frame.shape[:2]
 
         if anchor is None:
-            anchor = (w / 2.0, h / 2.0)
+            anchor = (frame_width / 2.0, frame_height / 2.0)
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = face_mesh.process(rgb)
@@ -272,8 +266,8 @@ def main():
             mouth_idxs = [13, 14, 61, 291]
             pts = []
             for idx in mouth_idxs:
-                x = int(fl.landmark[idx].x * w)
-                y = int(fl.landmark[idx].y * h)
+                x = int(fl.landmark[idx].x * frame_width)
+                y = int(fl.landmark[idx].y * frame_height)
                 pts.append((x, y))
             if pts:
                 cx = sum(p[0] for p in pts) / len(pts)
@@ -284,7 +278,7 @@ def main():
             lost += 1
             # if we lose tracking, command zero speeds (hold)
             if (now - last_send_time) >= COMMAND_PERIOD:
-                send_or_log_speeds(0.0, 0.0, 0.0)
+                send_speeds(0.0, 0.0, 0.0)
                 last_send_time = now
 
             if lost > MAX_LOST_FRAMES:
@@ -310,20 +304,20 @@ def main():
         else:
             dx_px_dt = smoothed[0] - prev_smoothed[0]
             dy_px_dt = smoothed[1] - prev_smoothed[1]
-            dvx, dvy = pixels_to_deg(dx_px_dt, dy_px_dt, w, h, FOV_H_DEG, FOV_V_DEG)
+            dvx, dvy = pixels_to_deg(dx_px_dt, dy_px_dt, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
             speed = math.hypot(dvx, dvy) / dt
 
         prev_time = now
         prev_smoothed = smoothed
 
-        box = build_stable_box(anchor, w, h, STABLE_SCALAR)
+        box = build_stable_box(anchor, frame_width, frame_height, STABLE_SCALAR)
         inside = inside_box(smoothed, box)
 
         dx_center = smoothed[0] - anchor[0]
         dy_center = smoothed[1] - anchor[1]
 
-        norm_dx = dx_center / (w / 2.0)
-        norm_dy = dy_center / (h / 2.0)
+        norm_dx = dx_center / (frame_width / 2.0)
+        norm_dy = dy_center / (frame_height / 2.0)
         radial_norm = math.hypot(norm_dx, norm_dy)
         within_stop_thresh = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
 
@@ -354,7 +348,7 @@ def main():
         roll_dps = 0.0
 
         if state == SEEKING and not too_wild:
-            err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, w, h, FOV_H_DEG, FOV_V_DEG)
+            err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
             err_yaw_deg *= AXIS_SIGN["yaw"]
             err_pitch_deg *= AXIS_SIGN["pitch"]
 
@@ -381,12 +375,12 @@ def main():
             smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, CMD_SPEED_EMA_ALPHA)
             smooth_roll_dps = ema_scalar(roll_dps, smooth_roll_dps, CMD_SPEED_EMA_ALPHA)
 
-            ok_send = send_or_log_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
+            ok_send = send_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
             if ok_send:
                 last_send_time = now
                 sent = 1
 
-        T = now - t0
+        T = now - initial_time
         print(f"{T:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f}")
 
         if DRAW:
@@ -408,11 +402,11 @@ def main():
 
     # stop motion on exit
     try:
-        send_or_log_speeds(0.0, 0.0, 0.0)
+        send_speeds(0.0, 0.0, 0.0)
     except Exception:
         pass
 
-    cap.release()
+    capture_dev.release()
     cv2.destroyAllWindows()
     print("Stopped.")
 

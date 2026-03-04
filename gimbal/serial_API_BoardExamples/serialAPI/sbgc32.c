@@ -39,9 +39,9 @@
 	#include "core/commandBuild.c"
 	#include "core/lowLayer.c"
 
-	#include "drivers/driverESP32/driverESP32.c"
+	//#include "drivers/driverESP32/driverESP32.c"
 	#include "drivers/driverLinux/driverLinux.c"
-	#include "drivers/driverSTM32/driverSTM32.c"
+	//#include "drivers/driverSTM32/driverSTM32.c"
 
 	#include "modules/adjvar/adjvar.c"
 	#include "modules/calib/calib.c"
