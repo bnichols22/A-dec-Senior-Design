@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # ==============================================================
-# File: full_tracking_speed.py
+# File: speed_control.py
 # Purpose:
 #   Smooth face tracker that drives gimbal using SPEED mode (deg/s).
-#   This eliminates the initial snap-to-zero bug because we never send
-#   an absolute angle setpoint on startup.
 #
-# Transport:
+# Motor lib usage:
 #   SimpleBGC SerialAPI shim:
 #     - bgc_init()
-#     - bgc_control_speeds(roll_dps, pitch_dps, yaw_dps)   <-- NEW
+#     - bgc_control_speeds(roll_dps, pitch_dps, yaw_dps)
 # ==============================================================
 
 import os, sys, time, math, warnings, statistics, ctypes
@@ -351,12 +349,13 @@ def main():
         # Check if we are close enough to stop
         within_stop_threshold = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
 
+        ### Compute Jitter using timed histogram to set too_wild var (may be able to be removed) ###
+        
         # Add values to the histogram
         pos_x.add(current_time, smoothed[0])
         pos_y.add(current_time, smoothed[1])
         vel_h.add(current_time, speed)
 
-        # Compute Jitter using timed histogram to set too_wild var (may be able to be removed)
         xs, ys = pos_x.values(), pos_y.values()
         pos_std = 999.0
         if len(xs) >= 6 and len(ys) >= 6:
@@ -366,6 +365,8 @@ def main():
 
         # If this is 0, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
         too_wild = (vel_med > VEL_THRESH_DEG_S * 2.0) or (pos_std > POS_STD_THRESH_PX * 2.0)
+
+        ###                                                                                      ###
 
         # Set States
         if state == LOCKED:
@@ -394,13 +395,14 @@ def main():
             roll_dps = 0.0  # keep roll off unless you want it
 
         else:
-            # LOCKED or too_wild -> hold
+            # LOCKED or too_wild so hold and do nothing
             yaw_dps = 0.0
             pitch_dps = 0.0
             roll_dps = 0.0
 
-        # Fixed-rate streaming + smoothing
+        # smooth and send the speeds to the controller
         sent = 0
+        # Check if enough time has passed since last send
         if (current_time - last_send_time) >= COMMAND_PERIOD:
             smooth_yaw_dps = ema_scalar(yaw_dps, smooth_yaw_dps, CMD_SPEED_EMA_ALPHA)
             smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, CMD_SPEED_EMA_ALPHA)
@@ -411,7 +413,7 @@ def main():
                 last_send_time = current_time
                 sent = 1
 
-
+        # Only print telemetry if desired
         if PRINT_TELEMETRY:
             print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f}")
 
