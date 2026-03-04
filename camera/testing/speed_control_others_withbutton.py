@@ -24,7 +24,7 @@ import os, sys, time, math, warnings, statistics, ctypes
 import cv2
 import mediapipe as mp
 from collections import deque
-import RPi.GPIO as GPIO
+import lgpio
 
 # --------- Paths + Filename ----------
 file_name = "speed_control_compliance_dynbox.py"
@@ -353,15 +353,27 @@ def main():
     # GPIO 6 pushbutton input (internal pull-up)
     BUTTON_PIN = 6
     BUTTON_DEBOUNCE_SEC = 0.20
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     last_button_event_time = 0.0
     prev_button_level = 1
+
+    gpio_handle = None
+    try:
+        gpio_handle = lgpio.gpiochip_open(0)
+        if hasattr(lgpio, "SET_PULL_UP"):
+            lgpio.gpio_claim_input(gpio_handle, BUTTON_PIN, lgpio.SET_PULL_UP)
+        else:
+            lgpio.gpio_claim_input(gpio_handle, BUTTON_PIN)
+    except Exception as e:
+        print(f"main: lgpio init failed: {e}")
+        gpio_handle = None
 
     def button_pressed_edge(now):
         nonlocal last_button_event_time, prev_button_level
 
-        level = GPIO.input(BUTTON_PIN)
+        if gpio_handle is None:
+            return False
+
+        level = lgpio.gpio_read(gpio_handle, BUTTON_PIN)
 
         pressed_event = False
         if prev_button_level == 1 and level == 0:
@@ -696,7 +708,17 @@ def main():
 
         capture_dev.release()
         cv2.destroyAllWindows()
-        GPIO.cleanup()
+
+        if gpio_handle is not None:
+            try:
+                lgpio.gpio_free(gpio_handle, BUTTON_PIN)
+            except Exception:
+                pass
+            try:
+                lgpio.gpiochip_close(gpio_handle)
+            except Exception:
+                pass
+
         print("Stopped.")
 
 
