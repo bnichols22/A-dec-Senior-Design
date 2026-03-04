@@ -68,8 +68,13 @@ AXIS_SIGN = {"yaw": 1, "pitch": 1, "roll": 1}
 # Capture vars
 MAX_STORED_FRAMES = 1
 
-# Other vars
-DRAW = True
+# If this is True, it makes a realtime window on monitor, otherwise it does not
+DRAW_FRAME_RT = True
+# If this is True it will print telemtry
+PRINT_TELEMETRY = False
+
+
+# Smoothing alpha val and max # of lost frames
 SMOOTH_ALPHA = 0.25
 MAX_LOST_FRAMES = 10
 
@@ -86,35 +91,36 @@ def ema_point(curr, prev, alpha):
     return (alpha * curr[0] + (1 - alpha) * prev[0],
             alpha * curr[1] + (1 - alpha) * prev[1])
 
-def ema_scalar(curr, prev, alpha):
-    if prev is None:
-        return curr
-    return alpha * curr + (1 - alpha) * prev
+def ema_scalar(current, previous, alpha):
+    if previous is None:
+        return current
+    return alpha * current + (1 - alpha) * previous
 
-def clamp(val, lo, hi):
-    return max(lo, min(hi, val))
+def clamp(value, min_val, max_val):
+    return max(min_val, min(max_val, value))
 
-def pixels_to_deg(dx_px, dy_px, frame_width, frame_height, fov_h, fov_v):
-    half_w, half_h = frame_width / 2.0, frame_height / 2.0
-    yaw_deg   = (dx_px / half_w) * (fov_h / 2.0)
-    pitch_deg = (dy_px / half_h) * (fov_v / 2.0)
+def pixels_to_deg(pixal_change_x, pixal_change_y, frame_width, frame_height, fov_horizontal, fov_verticle):
+    half_width, half_height = frame_width / 2.0, frame_height / 2.0
+    yaw_deg   = (pixal_change_x / half_width) * (fov_horizontal / 2.0)
+    pitch_deg = (pixal_change_y / half_height) * (fov_verticle / 2.0)
     return yaw_deg, pitch_deg
 
-def angle_deg(p1, p2):
-    return math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0]))
+def angle_deg(point1, point2):
+    return math.degrees(math.atan2(point2[1] - point1[1], point2[0] - point1[0]))
 
-def build_stable_box(center_xy, frame_width, frame_height, scalar):
-    cx, cy = center_xy
-    half_w = scalar * (frame_width / 2.0)
-    half_h = scalar * (frame_height / 2.0)
-    return (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+def build_stable_box(center_point, frame_width, frame_height, scalar):
+    center_x, center_y = center_point
+    half_width = scalar * (frame_width / 2.0)
+    half_height = scalar * (frame_height / 2.0)
+    return (center_x - half_width, center_y - half_height, center_x + half_width, center_y + half_height)
 
-def inside_box(pt, box):
+def inside_box(pt, stable_box):
     x, y = pt
-    l, t, r, b = box
+    l, t, r, b = stable_box
     return (l <= x <= r) and (t <= y <= b)
 
-class TimedHist:
+# If the histogram was removed, this coudl be deleted
+class TimedHistogram:
     def __init__(self, win_sec):
         self.win = win_sec
         self.buf = deque()
@@ -129,8 +135,8 @@ class TimedHist:
     def clear(self):
         self.buf.clear()
 
-    def _trim(self, now):
-        cut = now - self.win
+    def _trim(self, current_time):
+        cut = current_time - self.win
         while self.buf and self.buf[0][0] < cut:
             self.buf.popleft()
 
@@ -138,44 +144,44 @@ class TimedHist:
 # ----------------------------------------------------------------------
 # SBGC shim bindings (ctypes)
 # ----------------------------------------------------------------------
-_bgc_lib = None
-_bgc_initialized = False
+motor_library = None
+motor_library_initialized = False
 
 def init_sbgc():
-    global _bgc_lib, _bgc_initialized
+    global motor_library, motor_library_initialized
 
     try:
-        _bgc_lib = ctypes.CDLL(LIB_PATH)
+        motor_library = ctypes.CDLL(LIB_PATH)
         print(f"Loaded SBGC library from {LIB_PATH}")
     except OSError as e:
         # Return w/ Error code if we cannot open the .so
         print(f"init_sbgc: error loading {LIB_PATH}: {e}")
-        _bgc_lib = None
-        _bgc_initialized = False
+        motor_library = None
+        motor_library_initialized = False
         return
 
-    _bgc_lib.bgc_init.argtypes = []
-    _bgc_lib.bgc_init.restype = ctypes.c_int
+    motor_library.bgc_init.argtypes = []
+    motor_library.bgc_init.restype = ctypes.c_int
 
-    _bgc_lib.bgc_control_speeds.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
-    _bgc_lib.bgc_control_speeds.restype = ctypes.c_int
+    motor_library.bgc_control_speeds.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
+    motor_library.bgc_control_speeds.restype = ctypes.c_int
 
-    status_code = _bgc_lib.bgc_init()
+    status_code = motor_library.bgc_init()
     if status_code != 0:
         print(f"init_sbgc: error bgc_init() returned {status_code}")
-        _bgc_initialized = False
+        motor_library_initialized = False
         return
 
-    _bgc_initialized = True
+    motor_library_initialized = True
     print("Initialized the library")
 
 def send_speeds(roll_dps, pitch_dps, yaw_dps):
-    if _bgc_lib is None or not _bgc_initialized:
+    if motor_library is None or not motor_library_initialized:
         print("send_speeds: cannot send because lib is not initialied or setup")
         return False
 
     # send the speeds to the motors
-    status_code = _bgc_lib.bgc_control_speeds(
+    status_code = motor_library.bgc_control_speeds(
         ctypes.c_float(roll_dps),
         ctypes.c_float(pitch_dps),
         ctypes.c_float(yaw_dps),
@@ -214,8 +220,8 @@ def main():
     try:
         with open(LOG_PATH, "w") as log_file:
             log_file.write(f"Filename: {file_name}\n")
-            log_file.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            log_file.write(f"--------------------------------------------------------")
+            log_file.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log_file.write(f"--------------------------------------------------------\n")
         sys.stderr = log_file
     except Exception:
         print("Unable to open log file")
@@ -224,7 +230,7 @@ def main():
     initial_time = time.time()
     prev_smoothed = None
     prev_time = None
-    lost = 0
+    consecutive_lost_frames = 0
 
     anchor = None
 
@@ -232,9 +238,9 @@ def main():
     LOCKED, SEEKING = 0, 1
     state = LOCKED
 
-    pos_x = TimedHist(WINDOW_SEC)
-    pos_y = TimedHist(WINDOW_SEC)
-    vel_h = TimedHist(WINDOW_SEC)
+    pos_x = TimedHistogram(WINDOW_SEC)
+    pos_y = TimedHistogram(WINDOW_SEC)
+    vel_h = TimedHistogram(WINDOW_SEC)
 
     last_send_time = 0.0
 
@@ -245,86 +251,112 @@ def main():
 
     # ======= Main Loop =======
     while True:
-        ok, frame = capture_dev.read()
-        if not ok:
+        yaw_dps = 0.0
+        pitch_dps = 0.0
+        roll_dps = 0.0
+
+        frame_read, frame = capture_dev.read()
+        if not frame_read:
             log_file.write(f"main: frame grab failed\n")
             break
 
-        now = time.time()
+        current_time = time.time()
         frame_height, frame_width = frame.shape[:2]
 
         if anchor is None:
             anchor = (frame_width / 2.0, frame_height / 2.0)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = face_mesh.process(rgb)
+        # get the capture from camera
+        rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # process the image detecting faces and setting landmarks
+        processed_image = face_mesh.process(rgb_frame_cap)
 
         centroid = None
 
-        if res.multi_face_landmarks:
-            fl = res.multi_face_landmarks[0]
+        # Get the points from the face mesh and average to get centroid tuple
+        if processed_image.multi_face_landmarks:
+            # Only 1 face tracked, assumed to be patient face at index 0
+            patient_face = processed_image.multi_face_landmarks[0]
+            # known point ids: center upper lip, lower center lip, left mouth corner, right mouth corner
             mouth_idxs = [13, 14, 61, 291]
-            pts = []
+            # 
+            mouth_points = []
             for idx in mouth_idxs:
-                x = int(fl.landmark[idx].x * frame_width)
-                y = int(fl.landmark[idx].y * frame_height)
-                pts.append((x, y))
-            if pts:
-                cx = sum(p[0] for p in pts) / len(pts)
-                cy = sum(p[1] for p in pts) / len(pts)
-                centroid = (cx, cy)
-
+                x = int(patient_face.landmark[idx].x * frame_width)
+                y = int(patient_face.landmark[idx].y * frame_height)
+                mouth_points.append((x, y))
+            if mouth_points:
+                centroid_x = sum(x[0] for x in mouth_points) / len(mouth_points)
+                centroid_y = sum(y[1] for y in mouth_points) / len(mouth_points)
+                # Make tuple of averaged x and y vals to get mouth center centroid
+                centroid = (centroid_x, centroid_y)
+        # Handle if no centroid was found
         if centroid is None:
-            lost += 1
-            # if we lose tracking, command zero speeds (hold)
-            if (now - last_send_time) >= COMMAND_PERIOD:
+            consecutive_lost_frames += 1
+            # if we lose tracking hold
+            if (current_time - last_send_time) >= COMMAND_PERIOD:
                 send_speeds(0.0, 0.0, 0.0)
-                last_send_time = now
+                last_send_time = current_time
 
-            if lost > MAX_LOST_FRAMES:
+            # Check how many consecutive_lost_frames frames we have
+            if consecutive_lost_frames > MAX_LOST_FRAMES:
                 prev_smoothed = None
                 prev_time = None
 
-            if DRAW:
-                cv2.imshow("Centroid Tracker (SPEED mode)", frame)
+            if DRAW_FRAME_RT:
+                cv2.imshow(f"Image playback using: {file_name}", frame)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
+            # Go back to top of while loop
             continue
 
-        lost = 0
+        # Reset consecutive_lost_frames and smoothed if we got face points    
+        consecutive_lost_frames = 0
         smoothed = ema_point(centroid, prev_smoothed, SMOOTH_ALPHA)
 
         if prev_time is None:
-            prev_time = now
-        dt = max(1e-6, now - prev_time)
+            prev_time = current_time
+        # ensure the change in time is non-zero
+        delta_time = max(1e-6, current_time - prev_time)
 
-        # stability velocity estimate (deg/s)
+        # Find the angular change between frames and convert to speed in deg/s
         if prev_smoothed is None:
             speed = 0.0
         else:
-            dx_px_dt = smoothed[0] - prev_smoothed[0]
-            dy_px_dt = smoothed[1] - prev_smoothed[1]
-            dvx, dvy = pixels_to_deg(dx_px_dt, dy_px_dt, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
-            speed = math.hypot(dvx, dvy) / dt
+            pixal_displacement_x = smoothed[0] - prev_smoothed[0]
+            pixal_displacement_y = smoothed[1] - prev_smoothed[1]
+            # Get displacement in x and y in degrees
+            dvx, dvy = pixels_to_deg(pixal_displacement_x, pixal_displacement_y, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
+            # Convert the displacement into speed
+            speed = math.hypot(dvx, dvy) / delta_time
 
-        prev_time = now
+        # Set timing and smoothed the previous values for next loop
+        prev_time = current_time
         prev_smoothed = smoothed
 
-        box = build_stable_box(anchor, frame_width, frame_height, STABLE_SCALAR)
-        inside = inside_box(smoothed, box)
+        # Build our stable box
+        stable_box = build_stable_box(anchor, frame_width, frame_height, STABLE_SCALAR)
+        # Determine if we are in the stable region
+        in_stable_region = inside_box(smoothed, stable_box)
 
+        # Offset of centroid from center of frame
         dx_center = smoothed[0] - anchor[0]
         dy_center = smoothed[1] - anchor[1]
 
+        # Normalizes the offset error
         norm_dx = dx_center / (frame_width / 2.0)
         norm_dy = dy_center / (frame_height / 2.0)
+        # Find radial distance from center
         radial_norm = math.hypot(norm_dx, norm_dy)
-        within_stop_thresh = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
+        # Check if we are close enough to stop
+        within_stop_threshold = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
 
-        pos_x.add(now, smoothed[0])
-        pos_y.add(now, smoothed[1])
-        vel_h.add(now, speed)
+        # Add values to the histogram
+        pos_x.add(current_time, smoothed[0])
+        pos_y.add(current_time, smoothed[1])
+        vel_h.add(current_time, speed)
 
+        # Compute Jitter using timed histogram to set too_wild var (may be able to be removed)
         xs, ys = pos_x.values(), pos_y.values()
         pos_std = 999.0
         if len(xs) >= 6 and len(ys) >= 6:
@@ -332,21 +364,19 @@ def main():
         speeds = vel_h.values()
         vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
 
+        # If this is 0, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
         too_wild = (vel_med > VEL_THRESH_DEG_S * 2.0) or (pos_std > POS_STD_THRESH_PX * 2.0)
 
-        # state transitions
+        # Set States
         if state == LOCKED:
-            if not inside:
+            if not in_stable_region:
                 state = SEEKING
         else:
-            if within_stop_thresh:
+            if within_stop_threshold:
                 state = LOCKED
+        
 
-        # Compute desired speed commands
-        yaw_dps = 0.0
-        pitch_dps = 0.0
-        roll_dps = 0.0
-
+        # Comput the speed commands to send
         if state == SEEKING and not too_wild:
             err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
             err_yaw_deg *= AXIS_SIGN["yaw"]
@@ -357,6 +387,7 @@ def main():
                 err_yaw_deg = 0.0
             if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
                 err_pitch_deg = 0.0
+
 
             yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
             pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
@@ -370,39 +401,48 @@ def main():
 
         # Fixed-rate streaming + smoothing
         sent = 0
-        if (now - last_send_time) >= COMMAND_PERIOD:
+        if (current_time - last_send_time) >= COMMAND_PERIOD:
             smooth_yaw_dps = ema_scalar(yaw_dps, smooth_yaw_dps, CMD_SPEED_EMA_ALPHA)
             smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, CMD_SPEED_EMA_ALPHA)
             smooth_roll_dps = ema_scalar(roll_dps, smooth_roll_dps, CMD_SPEED_EMA_ALPHA)
 
             ok_send = send_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
             if ok_send:
-                last_send_time = now
+                last_send_time = current_time
                 sent = 1
 
-        T = now - initial_time
-        print(f"{T:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f}")
 
-        if DRAW:
-            l, t_, r, b = map(int, box)
+        if PRINT_TELEMETRY:
+            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f}")
+
+        # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
+        if DRAW_FRAME_RT:
+            l, t_, r, b = map(int, stable_box)
             cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
             cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
                            cv2.MARKER_CROSS, 12, 2)
             cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
 
-            state_txt = "LOCKED" if state == LOCKED else "SEEKING"
+            if state == LOCKED:
+                state_txt = "LOCKED"
+            else:
+                state_txt = "SEEKING"
+
             cv2.putText(frame, f"state:{state_txt}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
-            cv2.putText(frame, f"r={radial_norm:.3f}", (10, 48),
+            cv2.putText(frame, f"Radial distance = {radial_norm:.3f}", (10, 48),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
 
-            cv2.imshow("Centroid Tracker (SPEED mode)", frame)
+            cv2.imshow(f"Image playback using: {file_name}", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 
     # stop motion on exit
     try:
+        # Send a hold command to the motors
         send_speeds(0.0, 0.0, 0.0)
+        # Stop motors on end of program
+        motor_library.bgc_set_motors(0)
     except Exception:
         pass
 
