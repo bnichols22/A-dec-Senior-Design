@@ -1,0 +1,13 @@
+cd ~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI
+
+# Remove old build artifacts
+rm -f libsimplebgc.so sbgc32.o shim_update.o simplebgc_shim.o serialAPI_MakeCpp.o
+
+# Compile ALL SerialAPI sources through sbgc32.c (thanks to SBGC_NEED_SOURCES_MAKE = ON)
+gcc -fPIC -c sbgc32.c -o sbgc32.o
+
+# Compile the UPDATED shim (shim_update.c)
+gcc -fPIC -c shim_update.c -o shim_update.o
+
+# Link into a shared library
+gcc -shared -o libsimplebgc.so sbgc32.o shim_update.o -lpthread
