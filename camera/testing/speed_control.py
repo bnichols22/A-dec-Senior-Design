@@ -138,6 +138,24 @@ class TimedHistogram:
         while self.buf and self.buf[0][0] < cut:
             self.buf.popleft()
 
+def update_camera_settings(camera, filename):
+
+    if not os.path.exists(filename):
+        print(f"Error: File {filename} not found.")
+        return None
+    try:
+        with open(filename, 'r') as f:
+            data = json.load(f)
+        print(f"--> Profile LOADED from {filename}")
+        return data
+    except Exception as e:
+        print(f"Error loading profile: {e}")
+        return None
+
+    # If a camera doesn't support a property, cv2 usually just ignores it or returns false.
+    camera.set(cv2.CAP_PROP_EXPOSURE, current_settings["exposure"])
+    camera.set(cv2.CAP_PROP_BRIGHTNESS, current_settings["brightness"])
+    camera.set(cv2.CAP_PROP_CONTRAST, current_settings["contrast"])
 
 # ----------------------------------------------------------------------
 # SBGC shim bindings (ctypes)
