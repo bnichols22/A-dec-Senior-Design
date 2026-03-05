@@ -43,7 +43,6 @@ FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
 # --- Stable box base ---
-# NOTE: this value is now a "middle" default; actual box scalar is chosen by ranges below.
 STABLE_SCALAR_DEFAULT = 0.06
 
 WINDOW_SEC = 0.6
@@ -92,16 +91,11 @@ MAX_LOST_FRAMES = 10
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 warnings.filterwarnings("ignore")
 
-
-# ==============================================================
-# NEW: Discrete stable-box scaling by "distance" (eye pixel distance)
-# ==============================================================
 # Landmarks: 33 (left eye outer corner), 263 (right eye outer corner)
 EYE_L_IDX = 33
 EYE_R_IDX = 263
 
 # Tune these thresholds for your camera/resolution:
-# - If these feel off: print eye_dist_px and adjust.
 EYE_DIST_FAR_MAX   = 45.0   # <= this => FAR (face small/far)
 EYE_DIST_NEAR_MIN  = 85.0   # >= this => NEAR (face big/close)
 # Middle is between those.
@@ -111,7 +105,7 @@ STABLE_SCALAR_FAR  = 0.035  # small box when face is far
 STABLE_SCALAR_MID  = 0.060  # default
 STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
 
-# Prevent flicker: require N consecutive frames to accept a new range
+# Require N consecutive frames to accept a new range
 RANGE_SWITCH_FRAMES = 8
 
 
@@ -169,10 +163,10 @@ def range_from_eye_dist(eye_dist_px):
         return "NEAR"
     return "MID"
 
-def scalar_for_range(rng):
-    if rng == "FAR":
+def scalar_for_range(range):
+    if range == "FAR":
         return STABLE_SCALAR_FAR
-    if rng == "NEAR":
+    if range == "NEAR":
         return STABLE_SCALAR_NEAR
     return STABLE_SCALAR_MID
 
@@ -223,12 +217,9 @@ def init_sbgc():
     motor_library.bgc_control_speeds.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
     motor_library.bgc_control_speeds.restype = ctypes.c_int
 
-    # NEW: needed for compliance mode
-    if hasattr(motor_library, "bgc_set_motors"):
-        motor_library.bgc_set_motors.argtypes = [ctypes.c_int]
-        motor_library.bgc_set_motors.restype = ctypes.c_int
-    else:
-        print("init_sbgc: WARNING libsimplebgc.so missing bgc_set_motors(). Compliance mode will not work.")
+
+    motor_library.bgc_set_motors.argtypes = [ctypes.c_int]
+    motor_library.bgc_set_motors.restype = ctypes.c_int
 
     status_code = motor_library.bgc_init()
     if status_code != 0:
@@ -262,17 +253,10 @@ def set_motors(on_off: int):
       - on_off=0 -> motors OFF
       - on_off=1 -> motors ON
     """
-    if motor_library is None or not motor_library_initialized:
-        print("set_motors: cannot send because lib is not initialied or setup")
-        return False
 
-    if not hasattr(motor_library, "bgc_set_motors"):
-        print("set_motors: bgc_set_motors() missing from libsimplebgc.so")
-        return False
-
-    rc = motor_library.bgc_set_motors(ctypes.c_int(int(on_off)))
-    if rc != 0:
-        print(f"set_motors: bgc_set_motors({on_off}) returned {rc}")
+    status_code = motor_library.bgc_set_motors(ctypes.c_int(int(on_off)))
+    if status_code != 0:
+        print(f"set_motors: bgc_set_motors({on_off}) returned {status_code}")
         return False
     return True
 
@@ -333,17 +317,13 @@ def main():
     smooth_pitch_dps = None
     smooth_roll_dps = None
 
-    # ==============================================================
-    # NEW: Compliance / lock / tracking state (3-press 'c' cycle)
-    # ==============================================================
+    # Compliance mode 3 stages
     TRACKING_ENABLED = 0
     COMPLIANCE_MOTORS_OFF = 1
     HOLD_MOTORS_ON_NO_TRACK = 2
     mode = TRACKING_ENABLED
 
-    # ==============================================================
-    # NEW: Dynamic stable-box state
-    # ==============================================================
+    # Dynamic range stages
     stable_range = "MID"
     pending_range = None
     pending_count = 0
@@ -370,9 +350,7 @@ def main():
         if anchor is None:
             anchor = (frame_width / 2.0, frame_height / 2.0)
 
-        # ==============================================================
-        # NEW: Handle compliance/hold modes BEFORE doing face tracking
-        # ==============================================================
+        # Handle compliance/hold modes BEFORE doing face tracking
         if mode != TRACKING_ENABLED:
             # In these modes, we do NOT compute face tracking commands.
             # We either have motors OFF (compliance) or motors ON holding (0 speed).
@@ -385,10 +363,10 @@ def main():
 
             if DRAW_FRAME_RT:
                 if mode == COMPLIANCE_MOTORS_OFF:
-                    msg = "COMPLIANCE (motors OFF) - press 'c' to lock motors ON"
+                    msg = "COMPLIANCE - press 'c' to lock motors ON"
                     color = (0, 0, 255)
                 else:
-                    msg = "LOCKED HOLD (motors ON) - press 'c' to reenable tracking"
+                    msg = "LOCKED HOLD- press 'c' to re-enable tracking"
                     color = (0, 200, 255)
 
                 cv2.putText(frame, msg, (10, 28),
@@ -398,38 +376,34 @@ def main():
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
-                if key == ord('c'):
-                    # Press cycle:
-                    # 1) motors off  -> motors on hold (tracking still disabled)
-                    # 2) motors on hold -> tracking enabled
-                    if mode == COMPLIANCE_MOTORS_OFF:
-                        # Turn motors ON and hold this current position
-                        set_motors(1)
-                        send_speeds(0.0, 0.0, 0.0)
-                        time.sleep(0.05)
-                        send_speeds(0.0, 0.0, 0.0)
-                        mode = HOLD_MOTORS_ON_NO_TRACK
-                        # Reset tracking history so we don't jump on reenable
-                        prev_smoothed = None
-                        prev_time = None
-                        consecutive_lost_frames = 0
-                    else:
-                        # Now allow tracking again
-                        mode = TRACKING_ENABLED
-                        # Reset tracking history so we don't jump on reenable
-                        prev_smoothed = None
-                        prev_time = None
-                        consecutive_lost_frames = 0
-            else:
-                # No UI window: cannot read 'c' reliably, so just keep holding.
-                pass
+            if key == ord('c'):
+                # Press cycle:
+                # 1) motors off  -> motors on hold (tracking still disabled)
+                # 2) motors on hold -> tracking enabled
+                if mode == COMPLIANCE_MOTORS_OFF:
+                    # Turn motors ON and hold this current position
+                    set_motors(1)
+                    send_speeds(0.0, 0.0, 0.0)
+                    time.sleep(0.05)
+                    send_speeds(0.0, 0.0, 0.0)
+                    mode = HOLD_MOTORS_ON_NO_TRACK
+                    # Reset tracking history so we don't jump on reenable
+                    prev_smoothed = None
+                    prev_time = None
+                    consecutive_lost_frames = 0
+                else:
+                    # Now allow tracking again
+                    mode = TRACKING_ENABLED
+                    # Reset tracking history so we don't jump on reenable
+                    prev_smoothed = None
+                    prev_time = None
+                    consecutive_lost_frames = 0
 
             # Skip to next frame
             continue
 
-        # ==============================================================
-        # NORMAL TRACKING MODE (mode == TRACKING_ENABLED)
-        # ==============================================================
+        # If we get here that means we are in normal tracking mode
+        
         # get the capture from camera
         rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         # process the image detecting faces and setting landmarks

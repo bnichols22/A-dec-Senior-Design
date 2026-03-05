@@ -7,10 +7,10 @@
 # ADDITIONS:
 #   (1) Dynamic stable box sizing (discrete ranges) based on face distance
 #       proxy using FaceMesh eye distance (in pixels). Closer face => bigger box.
-#   (2) Compliance + lock modes on 'c' key, using a 3-press cycle:
-#       - Press 'c' once  -> MOTORS OFF (compliance; user can reposition by hand)
-#       - Press 'c' twice -> MOTORS ON, HOLD (0 speed) but TRACKING DISABLED
-#       - Press 'c' third -> TRACKING ENABLED again (normal operation)
+#   (2) Compliance + lock modes on gpio6 button press, using a 3-press cycle:
+#       - Press once  -> MOTORS OFF 
+#       - Press twice -> MOTORS ON, HOLD 
+#       - Press third -> TRACKING ENABLED again 
 #       Then repeat.
 #
 # Motor lib usage:
