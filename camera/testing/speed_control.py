@@ -207,10 +207,19 @@ def send_or_log_speeds(roll_dps, pitch_dps, yaw_dps):
 def main():
     init_sbgc()
 
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+    mp_hands = mp.solutions.hands
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
         static_image_mode=False, max_num_faces=1, refine_landmarks=True,
         min_detection_confidence=0.5, min_tracking_confidence=0.5
+    )
+
+    hands = mp_hands.Hands(
+        model_complexity=0,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
     )
 
     cap = cv2.VideoCapture(CAM_INDEX)
@@ -262,13 +271,28 @@ def main():
         if anchor is None:
             anchor = (w / 2.0, h / 2.0)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = face_mesh.process(rgb)
+        frame.flags.writeable = False
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        face_results = face_mesh.process(frame)
+        hands_results = hands.process(frame)
+
+
+        frame.flags.writeable = True
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if hands_results.multi_hand_landmarks:
+            for hand_landmarks in hands_results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style())
 
         centroid = None
 
-        if res.multi_face_landmarks:
-            fl = res.multi_face_landmarks[0]
+        if face_results.multi_face_landmarks:
+            fl = face_results.multi_face_landmarks[0]
             mouth_idxs = [13, 14, 61, 291]
             pts = []
             for idx in mouth_idxs:
