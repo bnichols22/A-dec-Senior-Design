@@ -53,10 +53,10 @@ def apply_camera_settings(cap, current_settings):
     cap.set(cv2.CAP_PROP_CONTRAST, current_settings["contrast"])
     
     # Disable autofocus to allow manual focus setting
-    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0) 
-    cap.set(cv2.CAP_PROP_FOCUS, current_settings["focus"])
+    #cap.set(cv2.CAP_PROP_AUTOFOCUS, 0) 
+    #cap.set(cv2.CAP_PROP_FOCUS, current_settings["focus"])
     
-    cap.set(cv2.CAP_PROP_WB_TEMPERATURE, current_settings["white_balance"])
+    #cap.set(cv2.CAP_PROP_WB_TEMPERATURE, current_settings["white_balance"])
 
 
 # --- Main Initialization ---
@@ -81,6 +81,9 @@ print(" s   : open DirectShow settings")
 print(" p   : SAVE current profile to JSON") 
 print(" o   : LOAD profile from JSON")
 print(" q   : exit the application")
+
+vid.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+vid.set(cv2.CAP_PROP_GAIN,0)
 
 while(True):
     if live_feed:

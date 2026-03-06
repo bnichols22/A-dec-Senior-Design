@@ -27,7 +27,7 @@ from collections import deque
 import lgpio
 import json
 
-# --------- Paths + Filename ----------
+# --------- Paths and Filename ----------
 file_name = "speed_control_compliance_dynbox.py"
 BASE_DIR = os.path.expanduser('~/senior_design/A-dec-Senior-Design/camera/testing')
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -40,7 +40,6 @@ LIB_PATH = os.path.expanduser(
 )
 
 CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
-CAMERA_PROFILE_NAME = "your_profile_name.json"
 
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
@@ -361,16 +360,17 @@ def main():
     )
 
     # Create capture device object and verify it constructed
-    capture_dev = cv2.VideoCapture(CAM_INDEX)
-    if not capture_dev.isOpened():
+    face_track_cam = cv2.VideoCapture(CAM_INDEX)
+    if not face_track_cam.isOpened():
         print(f'main: Error Unable to open camera from {CAM_INDEX}')
         # Exit here because we cannot run without camera
         sys.exit(1)
 
-    update_camera_settings(capture_dev, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
+    CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
+    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
 
     # Set the max number of stored frames allowed
-    capture_dev.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
+    face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
 
     # Clear test log
     try:
@@ -444,7 +444,7 @@ def main():
         pitch_dps = 0.0
         roll_dps = 0.0
 
-        frame_read, frame = capture_dev.read()
+        frame_read, frame = face_track_cam.read()
         if not frame_read:
             # Note: log_file is only set if file open succeeded above
             try:
@@ -729,11 +729,11 @@ def main():
                 break
             if key == ord('c'):
                 CAMERA_PROFILE_NAME = "wide_angle_full_light_on.json"
-                update_camera_settings(capture_dev, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
+                update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
             if key == ord('d'):
                 CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
-                update_camera_settings(capture_dev, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
-
+                update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
+                
     # stop motion on exit
     try:
         # Send a hold command to the motors
@@ -743,7 +743,7 @@ def main():
     except Exception:
         pass
 
-    capture_dev.release()
+    face_track_cam.release()
     cv2.destroyAllWindows()
 
     if gpio_handle is not None:
