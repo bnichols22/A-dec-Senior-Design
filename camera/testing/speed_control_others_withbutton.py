@@ -25,6 +25,7 @@ import cv2
 import mediapipe as mp
 from collections import deque
 import lgpio
+import json
 
 # --------- Paths + Filename ----------
 file_name = "speed_control_compliance_dynbox.py"
@@ -37,6 +38,9 @@ TEST_LOG  = os.path.join(BASE_DIR, 'Board_Serial_Command_Test.txt')
 LIB_PATH = os.path.expanduser(
     "~/senior_design/A-dec-Senior-Design/camera/testing/SerialLibrary/serialAPI/libsimplebgc.so"
 )
+
+CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
+CAMERA_PROFILE_NAME = "your_profile_name.json"
 
 # --------- Vision / tracker config ----------
 CAM_INDEX = 0
@@ -246,14 +250,20 @@ class TimedHistogram:
         while self.buf and self.buf[0][0] < cut:
             self.buf.popleft()
 
-def update_camera_settings(camera, filename):
+def update_camera_settings(camera, filename, profile_dir):
     try:
-        with open(filename, 'r') as f:
+        if os.path.isabs(filename):
+            profile_path = filename
+        else:
+            profile_path = os.path.join(profile_dir, filename)
+
+        with open(profile_path, 'r') as f:
             camera_settings = json.load(f)
         # If a camera doesn't support a property, cv2 usually just ignores it or returns false.
         camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
         camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])
         camera.set(cv2.CAP_PROP_CONTRAST, camera_settings["contrast"])
+        print(f"Loaded camera profile: {profile_path}")
     except Exception as camera_update_error:
         print(f"Error loading profile: {camera_update_error}")
 
@@ -356,6 +366,8 @@ def main():
         print(f'main: Error Unable to open camera from {CAM_INDEX}')
         # Exit here because we cannot run without camera
         sys.exit(1)
+
+    update_camera_settings(capture_dev, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
 
     # Set the max number of stored frames allowed
     capture_dev.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
@@ -715,6 +727,12 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 break
+            if key == ord('c'):
+                CAMERA_PROFILE_NAME = "wide_angle_full_light_on.json"
+                update_camera_settings(capture_dev, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
+            if key == ord('d'):
+                CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
+                update_camera_settings(capture_dev, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
 
     # stop motion on exit
     try:
