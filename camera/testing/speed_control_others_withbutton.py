@@ -225,6 +225,8 @@ def handle_mode_cycle(mode, prev_smoothed, prev_time, consecutive_lost_frames, s
 
 # If the histogram was removed, this coudl be deleted
 class TimedHistogram:
+
+
     def __init__(self, win_sec):
         self.win = win_sec
         self.buf = deque()
@@ -243,6 +245,17 @@ class TimedHistogram:
         cut = current_time - self.win
         while self.buf and self.buf[0][0] < cut:
             self.buf.popleft()
+
+def update_camera_settings(camera, filename):
+    try:
+        with open(filename, 'r') as f:
+            camera_settings = json.load(f)
+        # If a camera doesn't support a property, cv2 usually just ignores it or returns false.
+        camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
+        camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])
+        camera.set(cv2.CAP_PROP_CONTRAST, camera_settings["contrast"])
+    except Exception as camera_update_error:
+        print(f"Error loading profile: {camera_update_error}")
 
 
 # ----------------------------------------------------------------------
