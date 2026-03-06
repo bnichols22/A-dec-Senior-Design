@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 # ==============================================================
-# File: speed_control.py
+# File: speed_control_compliance_dynbox.py
 # Purpose:
 #   Smooth face tracker that drives gimbal using SPEED mode (deg/s).
+#
+# ADDITIONS:
+#   (1) Dynamic stable box sizing (discrete ranges) based on face distance
+#       proxy using FaceMesh eye distance (in pixels). Closer face => bigger box.
+#   (2) Compliance + lock modes on 'c' key, using a 3-press cycle:
+#       - Press 'c' once  -> MOTORS OFF (compliance; user can reposition by hand)
+#       - Press 'c' twice -> MOTORS ON, HOLD (0 speed) but TRACKING DISABLED
+#       - Press 'c' third -> TRACKING ENABLED again (normal operation)
+#       Then repeat.
 #
 # Motor lib usage:
 #   SimpleBGC SerialAPI shim:
 #     - bgc_init()
 #     - bgc_control_speeds(roll_dps, pitch_dps, yaw_dps)
+#     - bgc_set_motors(on_off)   (0=off, 1=on)
 # ==============================================================
 
 import os, sys, time, math, warnings, statistics, ctypes
@@ -16,7 +26,7 @@ import mediapipe as mp
 from collections import deque
 
 # --------- Paths + Filename ----------
-file_name = "speed_control.py"
+file_name = "speed_control_compliance_dynbox.py"
 BASE_DIR = os.path.expanduser('~/senior_design/A-dec-Senior-Design/camera/testing')
 os.makedirs(BASE_DIR, exist_ok=True)
 
@@ -32,7 +42,9 @@ CAM_INDEX = 0
 FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
-STABLE_SCALAR = 0.06
+# --- Stable box base ---
+STABLE_SCALAR_DEFAULT = 0.06
+
 WINDOW_SEC = 0.6
 STABLE_STOP_SEEKING_THRESHOLD = 0.025
 
@@ -58,7 +70,7 @@ COMMAND_HZ = 150.0
 COMMAND_PERIOD = 1.0 / COMMAND_HZ
 
 # Smooth commanded speeds (0=no smoothing, 1=very slow)
-CMD_SPEED_EMA_ALPHA = 0.35  # 
+CMD_SPEED_EMA_ALPHA = 0.35
 
 # Axis sign values (trying to keep them all + for ease of conceptualization)
 AXIS_SIGN = {"yaw": 1, "pitch": 1, "roll": 1}
@@ -71,7 +83,6 @@ DRAW_FRAME_RT = True
 # If this is True it will print telemtry
 PRINT_TELEMETRY = False
 
-
 # Smoothing alpha val and max # of lost frames
 SMOOTH_ALPHA = 0.25
 MAX_LOST_FRAMES = 10
@@ -79,6 +90,23 @@ MAX_LOST_FRAMES = 10
 # Environment logging stuff
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 warnings.filterwarnings("ignore")
+
+# Landmarks: 33 (left eye outer corner), 263 (right eye outer corner)
+EYE_L_IDX = 33
+EYE_R_IDX = 263
+
+# Tune these thresholds for your camera/resolution:
+EYE_DIST_FAR_MAX   = 45.0   # <= this => FAR (face small/far)
+EYE_DIST_NEAR_MIN  = 85.0   # >= this => NEAR (face big/close)
+# Middle is between those.
+
+# Stable box scalars for each range
+STABLE_SCALAR_FAR  = 0.035  # small box when face is far
+STABLE_SCALAR_MID  = 0.060  # default
+STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
+
+# Require N consecutive frames to accept a new range
+RANGE_SWITCH_FRAMES = 8
 
 
 # ---------------- Helper Functions ----------------
@@ -103,9 +131,6 @@ def pixels_to_deg(pixal_change_x, pixal_change_y, frame_width, frame_height, fov
     pitch_deg = (pixal_change_y / half_height) * (fov_verticle / 2.0)
     return yaw_deg, pitch_deg
 
-def angle_deg(point1, point2):
-    return math.degrees(math.atan2(point2[1] - point1[1], point2[0] - point1[0]))
-
 def build_stable_box(center_point, frame_width, frame_height, scalar):
     center_x, center_y = center_point
     half_width = scalar * (frame_width / 2.0)
@@ -116,6 +141,34 @@ def inside_box(pt, stable_box):
     x, y = pt
     l, t, r, b = stable_box
     return (l <= x <= r) and (t <= y <= b)
+
+def estimate_eye_dist_px(face_landmarks, frame_width, frame_height):
+    """Return eye distance (px) using FaceMesh landmarks. Returns None if unavailable."""
+    try:
+        lx = face_landmarks.landmark[EYE_L_IDX].x * frame_width
+        ly = face_landmarks.landmark[EYE_L_IDX].y * frame_height
+        rx = face_landmarks.landmark[EYE_R_IDX].x * frame_width
+        ry = face_landmarks.landmark[EYE_R_IDX].y * frame_height
+        return math.hypot(rx - lx, ry - ly)
+    except Exception:
+        return None
+
+def range_from_eye_dist(eye_dist_px):
+    """Map eye distance to discrete distance ranges."""
+    if eye_dist_px is None:
+        return "MID"  # safe default
+    if eye_dist_px <= EYE_DIST_FAR_MAX:
+        return "FAR"
+    if eye_dist_px >= EYE_DIST_NEAR_MIN:
+        return "NEAR"
+    return "MID"
+
+def scalar_for_range(range):
+    if range == "FAR":
+        return STABLE_SCALAR_FAR
+    if range == "NEAR":
+        return STABLE_SCALAR_NEAR
+    return STABLE_SCALAR_MID
 
 # If the histogram was removed, this coudl be deleted
 class TimedHistogram:
@@ -138,24 +191,6 @@ class TimedHistogram:
         while self.buf and self.buf[0][0] < cut:
             self.buf.popleft()
 
-def update_camera_settings(camera, filename):
-
-    if not os.path.exists(filename):
-        print(f"Error: File {filename} not found.")
-        return None
-    try:
-        with open(filename, 'r') as f:
-            data = json.load(f)
-        print(f"--> Profile LOADED from {filename}")
-        return data
-    except Exception as e:
-        print(f"Error loading profile: {e}")
-        return None
-
-    # If a camera doesn't support a property, cv2 usually just ignores it or returns false.
-    camera.set(cv2.CAP_PROP_EXPOSURE, current_settings["exposure"])
-    camera.set(cv2.CAP_PROP_BRIGHTNESS, current_settings["brightness"])
-    camera.set(cv2.CAP_PROP_CONTRAST, current_settings["contrast"])
 
 # ----------------------------------------------------------------------
 # SBGC shim bindings (ctypes)
@@ -181,6 +216,10 @@ def init_sbgc():
 
     motor_library.bgc_control_speeds.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
     motor_library.bgc_control_speeds.restype = ctypes.c_int
+
+
+    motor_library.bgc_set_motors.argtypes = [ctypes.c_int]
+    motor_library.bgc_set_motors.restype = ctypes.c_int
 
     status_code = motor_library.bgc_init()
     if status_code != 0:
@@ -208,6 +247,19 @@ def send_speeds(roll_dps, pitch_dps, yaw_dps):
 
     return True
 
+def set_motors(on_off: int):
+    """
+    Motors control:
+      - on_off=0 -> motors OFF
+      - on_off=1 -> motors ON
+    """
+
+    status_code = motor_library.bgc_set_motors(ctypes.c_int(int(on_off)))
+    if status_code != 0:
+        print(f"set_motors: bgc_set_motors({on_off}) returned {status_code}")
+        return False
+    return True
+
 
 # ---------------- Main loop ----------------
 def main():
@@ -228,7 +280,7 @@ def main():
         print(f'main: Error Unable to open camera from {CAM_INDEX}')
         # Exit here because we cannot run without camera
         sys.exit(1)
-    
+
     # Set the max number of stored frames allowed
     capture_dev.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
 
@@ -265,6 +317,18 @@ def main():
     smooth_pitch_dps = None
     smooth_roll_dps = None
 
+    # Compliance mode 3 stages
+    TRACKING_ENABLED = 0
+    COMPLIANCE_MOTORS_OFF = 1
+    HOLD_MOTORS_ON_NO_TRACK = 2
+    mode = TRACKING_ENABLED
+
+    # Dynamic range stages
+    stable_range = "MID"
+    pending_range = None
+    pending_count = 0
+    stable_scalar = STABLE_SCALAR_DEFAULT
+
     # ======= Main Loop =======
     while True:
         yaw_dps = 0.0
@@ -273,7 +337,11 @@ def main():
 
         frame_read, frame = capture_dev.read()
         if not frame_read:
-            log_file.write(f"main: frame grab failed\n")
+            # Note: log_file is only set if file open succeeded above
+            try:
+                log_file.write(f"main: frame grab failed\n")
+            except Exception:
+                pass
             break
 
         current_time = time.time()
@@ -282,30 +350,91 @@ def main():
         if anchor is None:
             anchor = (frame_width / 2.0, frame_height / 2.0)
 
+        # Handle compliance/hold modes BEFORE doing face tracking
+        if mode != TRACKING_ENABLED:
+            # In these modes, we do NOT compute face tracking commands.
+            # We either have motors OFF (compliance) or motors ON holding (0 speed).
+            if (current_time - last_send_time) >= COMMAND_PERIOD:
+                # HOLD mode wants a steady 0-speed stream.
+                # Compliance mode does not need commands, but this keeps timing consistent.
+                if mode == HOLD_MOTORS_ON_NO_TRACK:
+                    send_speeds(0.0, 0.0, 0.0)
+                last_send_time = current_time
+
+            if DRAW_FRAME_RT:
+                if mode == COMPLIANCE_MOTORS_OFF:
+                    msg = "COMPLIANCE - press 'c' to lock motors ON"
+                    color = (0, 0, 255)
+                else:
+                    msg = "LOCKED HOLD- press 'c' to re-enable tracking"
+                    color = (0, 200, 255)
+
+                cv2.putText(frame, msg, (10, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+                cv2.imshow(f"Image playback using: {file_name}", frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:
+                    break
+            if key == ord('c'):
+                # Press cycle:
+                # 1) motors off  -> motors on hold (tracking still disabled)
+                # 2) motors on hold -> tracking enabled
+                if mode == COMPLIANCE_MOTORS_OFF:
+                    # Turn motors ON and hold this current position
+                    set_motors(1)
+                    send_speeds(0.0, 0.0, 0.0)
+                    time.sleep(0.05)
+                    send_speeds(0.0, 0.0, 0.0)
+                    mode = HOLD_MOTORS_ON_NO_TRACK
+                    # Reset tracking history so we don't jump on reenable
+                    prev_smoothed = None
+                    prev_time = None
+                    consecutive_lost_frames = 0
+                else:
+                    # Now allow tracking again
+                    mode = TRACKING_ENABLED
+                    # Reset tracking history so we don't jump on reenable
+                    prev_smoothed = None
+                    prev_time = None
+                    consecutive_lost_frames = 0
+
+            # Skip to next frame
+            continue
+
+        # If we get here that means we are in normal tracking mode
+        
         # get the capture from camera
         rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         # process the image detecting faces and setting landmarks
         processed_image = face_mesh.process(rgb_frame_cap)
 
         centroid = None
+        eye_dist_px = None
 
         # Get the points from the face mesh and average to get centroid tuple
         if processed_image.multi_face_landmarks:
             # Only 1 face tracked, assumed to be patient face at index 0
             patient_face = processed_image.multi_face_landmarks[0]
+
             # known point ids: center upper lip, lower center lip, left mouth corner, right mouth corner
             mouth_idxs = [13, 14, 61, 291]
-            # 
+
             mouth_points = []
             for idx in mouth_idxs:
                 x = int(patient_face.landmark[idx].x * frame_width)
                 y = int(patient_face.landmark[idx].y * frame_height)
                 mouth_points.append((x, y))
+
             if mouth_points:
-                centroid_x = sum(x[0] for x in mouth_points) / len(mouth_points)
-                centroid_y = sum(y[1] for y in mouth_points) / len(mouth_points)
+                centroid_x = sum(p[0] for p in mouth_points) / len(mouth_points)
+                centroid_y = sum(p[1] for p in mouth_points) / len(mouth_points)
                 # Make tuple of averaged x and y vals to get mouth center centroid
                 centroid = (centroid_x, centroid_y)
+
+            # NEW: get distance proxy for dynamic stable-box sizing
+            eye_dist_px = estimate_eye_dist_px(patient_face, frame_width, frame_height)
+
         # Handle if no centroid was found
         if centroid is None:
             consecutive_lost_frames += 1
@@ -321,8 +450,14 @@ def main():
 
             if DRAW_FRAME_RT:
                 cv2.imshow(f"Image playback using: {file_name}", frame)
-                if cv2.waitKey(1) & 0xFF == 27:
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:
                     break
+                if key == ord('c'):
+                    # Press 'c' once -> motors OFF (compliance)
+                    send_speeds(0.0, 0.0, 0.0)
+                    set_motors(0)
+                    mode = COMPLIANCE_MOTORS_OFF
             # Go back to top of while loop
             continue
 
@@ -350,8 +485,29 @@ def main():
         prev_time = current_time
         prev_smoothed = smoothed
 
-        # Build our stable box
-        stable_box = build_stable_box(anchor, frame_width, frame_height, STABLE_SCALAR)
+        # ==============================================================
+        # NEW: Update stable box scalar using discrete ranges + debounce
+        # ==============================================================
+        desired_range = range_from_eye_dist(eye_dist_px)
+        if desired_range != stable_range:
+            if pending_range != desired_range:
+                pending_range = desired_range
+                pending_count = 1
+            else:
+                pending_count += 1
+
+            if pending_count >= RANGE_SWITCH_FRAMES:
+                stable_range = desired_range
+                pending_range = None
+                pending_count = 0
+                stable_scalar = scalar_for_range(stable_range)
+        else:
+            pending_range = None
+            pending_count = 0
+            stable_scalar = scalar_for_range(stable_range)
+
+        # Build our stable box (dynamic scalar)
+        stable_box = build_stable_box(anchor, frame_width, frame_height, stable_scalar)
         # Determine if we are in the stable region
         in_stable_region = inside_box(smoothed, stable_box)
 
@@ -368,7 +524,7 @@ def main():
         within_stop_threshold = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
 
         ### Compute Jitter using timed histogram to set too_wild var (may be able to be removed) ###
-        
+
         # Add values to the histogram
         pos_x.add(current_time, smoothed[0])
         pos_y.add(current_time, smoothed[1])
@@ -393,7 +549,7 @@ def main():
         else:
             if within_stop_threshold:
                 state = LOCKED
-        
+
 
         # Comput the speed commands to send
         if state == SEEKING and not too_wild:
@@ -433,7 +589,8 @@ def main():
 
         # Only print telemetry if desired
         if PRINT_TELEMETRY:
-            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f}")
+            eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
+            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range}")
 
         # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
         if DRAW_FRAME_RT:
@@ -453,16 +610,30 @@ def main():
             cv2.putText(frame, f"Radial distance = {radial_norm:.3f}", (10, 48),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
 
+            # NEW: show dynamic stable-box info
+            eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
+            cv2.putText(frame, f"eye_px={eye_str} box={stable_scalar:.3f} {stable_range}", (10, 72),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
+
+            cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 96),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+
             cv2.imshow(f"Image playback using: {file_name}", frame)
-            if cv2.waitKey(1) & 0xFF == 27:
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:
                 break
+            if key == ord('c'):
+                # Press 'c' once -> motors OFF (compliance)
+                send_speeds(0.0, 0.0, 0.0)
+                set_motors(0)
+                mode = COMPLIANCE_MOTORS_OFF
 
     # stop motion on exit
     try:
         # Send a hold command to the motors
         send_speeds(0.0, 0.0, 0.0)
         # Stop motors on end of program
-        motor_library.bgc_set_motors(0)
+        set_motors(0)
     except Exception:
         pass
 

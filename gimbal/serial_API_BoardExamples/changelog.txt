@@ -1,0 +1,123 @@
+
+‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+                                Releases
+________________________________________________________________________
+
+### Release 2.2.1  - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+- A new setting added:
+	* SBGC_NEED_SOURCES_MAKE
+- driverArduino.cpp build bugfix
+
+### Release 2.2  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+- serialAPI_ConfigTemplate transferred part of the STM32 settings to driverSTM32_ConfigTemplate.h
+- A new setting block added:
+	* SBGC_USE_ESPIDF_DRIVER
+- SBGC_DRV_USE_CUBEMX renamed to SBGC_DRV_CONFIGURED
+- SBGC_USE_LINUX_OS renamed to SBGC_USE_PTHREAD_OS
+- The next functions added:
+	* SerialAPI_EditAdjVarValueFloat
+	* SBGC32_SetAdjVarValueFloat
+	* SBGC32_SetAdjVarValuesFloat
+	* SBGC32_GetAdjVarValueFloat
+	* SBGC32_GetAdjVarValuesFloat
+- ESP-IDF driver added
+- Minor changes in driver structures
+- Minor code optimizations
+
+### Release 2.1  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+- MiniRemote v1.3 - major GUI improvements, minor optimizations
+- A new settings added:
+	* SBGC_CHAINED_TIMEOUT
+	* SBGC_LOG_COMMAND_TIME
+	* SBGC_DETAILED_CONFIRM
+	* SBGC_THREAD_QUIET_PRIOR
+	* SBGC_NEED_AUTO_PING
+	* SBGC_AUTO_PING_PERIOD
+	* SBGC_LOG_AUTO_PING
+	* SBGC_AUTO_PING_CALLBACK
+- The next functions added:
+	* SBGC32_SetServoOutExt
+	* SBGC32_RequestModuleList
+	* SerialAPI_LogCommandQueue
+	* SerialAPI_CommandWaitingHandler
+- The SBGC32_ExpectCommand function gets +2 additional arguments
+- The initialization process have optimized
+- Minor code optimizations and grammar corrections
+
+### Release 2.0 (incompatible with old version)  - - - - - - - - - - - -
+
+- Two new operating modes added to the library: non-blocking and OS-compatible
+- The configuration file significantly updated with many new settings added
+- A large note added to file sbgc32.h, providing a more detailed description of the library's features
+- A new example, 'QuickStart' has been added for all systems
+- In the new operating modes, SBGC32_ functions are provided with additional arguments
+- Many object and type names renamed to create a custom namespace - sbgc_ and serialAPI_
+- Many helper functions and macros added
+- Each protocol function now includes additional documentation and a mini-example of its usage
+- The main protocol functions modified as follows:
+	* SBGC32_SetAdjVarValue - added
+	* SBGC32_GetAdjVarValues - now processes up to 40 adjustable variables
+	* SBGC32_RequestAdjVarsInfo - added
+	* SBGC32_CalibExtGain - deleted
+	* SBGC32_CalibCogging - added
+	* SBGC32_ControlExt - added
+	* SBGC32_ControlQuat - added
+	* SBGC32_ControlQuatConfig - added
+	* SBGC32_SendCmdToExtSens - added
+	* SBGC32_RequestDataStream renamed to SBGC32_StartDataStream
+	* SBGC32_ParseDataStream renamed to SBGC32_ReadDataStream. New parameter 'size' added
+	* SBGC32_RequestRealTimeDataCustom - 'flags' parameter deleted. New parameter 'size' added
+	* SBGC32_RequestDebugVarInfo3 - operation principle changed. New parameters 'startIndex' and 'varQuan' added
+	* SBGC32_ControlQuatStatus - added
+	* SBGC32_TuneAutoPID2 - now works starting with 2.73.1+ controller firmware
+	* SBGC32_ParseAutoPID_StateCmd renamed to SBGC32_ReadAutoPID_StateCmd. Operation principle changed also
+	* SBGC32_SynchronizeMotors - added
+	* SBGC32_RequestMotorState - added
+	* SBGC32_ReadMotorState - added
+	* SBGC32_ParseScriptDebugInfoCmd renamed to SBGC32_ReadScriptDebugInfo
+	* SBGC32_SetDebugPort - added
+	* SBGC32_ReadDebugPort - added
+	* SBGC32_SendTransparentCommand - added
+	* SBGC32_ReadTransparentCommand - added
+	* SBGC32_ParseEventCmd - deleted
+	* SBGC32_CAN_DeviceScan - added
+- It's possible now to send serial commands manually using SBGC32_SendRawCommand function
+- Protocol functions handling confirmation now accept an additional parameter — a confirmation structure
+- Now it is possible to define a custom sprintf function using SerialAPI_LinkSprintf()
+- An exponential filter for gimbal control added to the MiniRemote project
+- Bugfix and grammar correction
+
+### Release 1.1  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+- The MiniRemote example for STM32 has been released
+- Input parser minor improvements
+- The UNEXP_CMD_ALWAYS_SAVE config-flag changed to the UNEXP_CMD_OLD_PRIORITY
+- Minor bugfix
+- Minor grammar correction
+
+### Release 1.0  - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+- Library structure has been changed
+- All settings have been moved to a separate file - serialAPI_ConfigTemplate.h
+- Added data structures with reference information + PrintWholeStruct() function
+- Added customization of sprintf() function as GeneralSBGC_t parameter
+- SBGC32_StopDataStream() function has been added
+- 2nd argument of InitAdjVar() function has been changed
+- Added extended IMU calibration functions
+- DriverDeinit() function for STM32 driver has been added
+- Module build config-flags have been added
+- Driver build config-flags have been added
+- Added command confirmation handling config-flag
+- Added reference info config-flag
+- Added adjustable variables reference info config-flag
+- Added config-flag of adjustable variable's name
+- Added adjustable variable's extender config-flag
+- Added config-flag to save unexpected commands permanently
+- Added config-parameter for request timeout waiting
+- Input parser bugfix
+- High layer functions minor bugfix
+- Minor change in type names
+- Minor grammar correction
