@@ -118,11 +118,11 @@ RANGE_SWITCH_FRAMES = 8
 
 # ---------------- Helper Functions ----------------
 
-def ema_point(curr, prev, alpha):
-    if prev is None:
-        return curr
-    return (alpha * curr[0] + (1 - alpha) * prev[0],
-            alpha * curr[1] + (1 - alpha) * prev[1])
+def ema_point(current_smooth, previous_smooth, alpha):
+    if previous_smooth is None:
+        return current_smooth
+    return (alpha * current_smooth[0] + (1 - alpha) * previous_smooth[0],
+            alpha * current_smooth[1] + (1 - alpha) * previous_smooth[1])
 
 def ema_scalar(current, previous, alpha):
     if previous is None:
