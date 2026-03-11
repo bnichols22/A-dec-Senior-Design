@@ -124,10 +124,19 @@ PROFILE_LIGHT_OFF = os.path.join(BASE_DIR, "wide_angle_full_light_off.json")
 
 # Bright pixel threshold and ratio for washout detection
 WASHOUT_PIXEL_THRESHOLD = 245
-WASHOUT_RATIO_THRESHOLD = 0.010
+
+# Hysteresis thresholds:
+# - enter washed-out mode only when bright_ratio rises above ENTER threshold
+# - leave washed-out mode only when bright_ratio falls below EXIT threshold
+# EXIT threshold should be LOWER than ENTER threshold to prevent chatter
+WASHOUT_ENTER_RATIO = 0.012
+WASHOUT_EXIT_RATIO  = 0.004
 
 # Require multiple consecutive frames before switching profiles
-PROFILE_SWITCH_CONFIRM_FRAMES = 5
+PROFILE_SWITCH_CONFIRM_FRAMES = 4
+
+# After loading a profile, ignore switching for some frames so exposure can settle
+PROFILE_SETTLE_FRAMES = 20
 
 
 # ---------------- Helper Functions ----------------
@@ -242,11 +251,10 @@ def update_camera_settings(camera, filename):
 
     return current_settings
 
-def classify_washout(frame):
+def measure_bright_ratio(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     bright_ratio = float((gray >= WASHOUT_PIXEL_THRESHOLD).sum()) / float(gray.size)
-    washed_out = bright_ratio >= WASHOUT_RATIO_THRESHOLD
-    return washed_out, bright_ratio
+    return bright_ratio
 
 def handle_washout_profile_switch(camera, frame, profile_state):
     """
@@ -258,9 +266,22 @@ def handle_washout_profile_switch(camera, frame, profile_state):
       - visual_mode
       - pending_visual_mode
       - pending_count
+      - settle_frames_left
     """
-    washed_out, bright_ratio = classify_washout(frame)
-    desired_mode = "WASHED_OUT" if washed_out else "NOT_WASHED_OUT"
+    bright_ratio = measure_bright_ratio(frame)
+
+    # Let the camera settle after a profile change before evaluating again
+    if profile_state["settle_frames_left"] > 0:
+        profile_state["settle_frames_left"] -= 1
+        return profile_state["visual_mode"], bright_ratio
+
+    # Hysteresis logic:
+    # If currently not washed out, require the higher ENTER threshold.
+    # If currently washed out, require falling below the lower EXIT threshold.
+    if profile_state["visual_mode"] == "WASHED_OUT":
+        desired_mode = "NOT_WASHED_OUT" if bright_ratio <= WASHOUT_EXIT_RATIO else "WASHED_OUT"
+    else:
+        desired_mode = "WASHED_OUT" if bright_ratio >= WASHOUT_ENTER_RATIO else "NOT_WASHED_OUT"
 
     if desired_mode != profile_state["visual_mode"]:
         if desired_mode != profile_state["pending_visual_mode"]:
@@ -279,16 +300,18 @@ def handle_washout_profile_switch(camera, frame, profile_state):
                     settings = update_camera_settings(camera, PROFILE_LIGHT_ON)
                     if settings is not None:
                         profile_state["loaded_profile"] = "LIGHT_ON"
+                        profile_state["settle_frames_left"] = PROFILE_SETTLE_FRAMES
             else:
                 if profile_state["loaded_profile"] != "LIGHT_OFF":
                     settings = update_camera_settings(camera, PROFILE_LIGHT_OFF)
                     if settings is not None:
                         profile_state["loaded_profile"] = "LIGHT_OFF"
+                        profile_state["settle_frames_left"] = PROFILE_SETTLE_FRAMES
     else:
         profile_state["pending_visual_mode"] = None
         profile_state["pending_count"] = 0
 
-    return desired_mode, bright_ratio
+    return profile_state["visual_mode"], bright_ratio
 
 
 # ----------------------------------------------------------------------
@@ -450,9 +473,10 @@ def main():
     # ==============================================================
     profile_state = {
         "loaded_profile": "LIGHT_OFF",
-        "visual_mode": "UNKNOWN",
+        "visual_mode": "NOT_WASHED_OUT",
         "pending_visual_mode": None,
         "pending_count": 0,
+        "settle_frames_left": PROFILE_SETTLE_FRAMES,
     }
 
     # GPIO 6 pushbutton input (internal pull-up)
@@ -580,7 +604,7 @@ def main():
                     cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f}", (10, 54),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
-                    cv2.putText(frame, f"profile:{profile_state['loaded_profile']}", (10, 80),
+                    cv2.putText(frame, f"profile:{profile_state['loaded_profile']} settle={profile_state['settle_frames_left']}", (10, 80),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
                     cv2.imshow(f"Image playback using: {file_name}", frame)
@@ -646,7 +670,7 @@ def main():
                     cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f}", (10, 24),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
-                    cv2.putText(frame, f"profile:{profile_state['loaded_profile']}", (10, 48),
+                    cv2.putText(frame, f"profile:{profile_state['loaded_profile']} settle={profile_state['settle_frames_left']}", (10, 48),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
                     cv2.imshow(f"Image playback using: {file_name}", frame)
@@ -784,7 +808,7 @@ def main():
             if PRINT_TELEMETRY:
                 eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
                 state_txt = "LOCKED" if state == LOCKED else "SEEKING"
-                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state_txt} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} scene={visual_state} bright={bright_ratio:.3f} profile={profile_state['loaded_profile']}")
+                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state_txt} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} scene={visual_state} bright={bright_ratio:.3f} profile={profile_state['loaded_profile']} settle={profile_state['settle_frames_left']}")
 
             # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
             if DRAW_FRAME_RT:
@@ -812,7 +836,7 @@ def main():
                 cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f}", (10, 96),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
-                cv2.putText(frame, f"profile:{profile_state['loaded_profile']}", (10, 120),
+                cv2.putText(frame, f"profile:{profile_state['loaded_profile']} settle={profile_state['settle_frames_left']}", (10, 120),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
                 cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 144),
