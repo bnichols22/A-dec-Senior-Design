@@ -8,7 +8,7 @@ import os
 
 # Default state used if no profile is loaded
 settings = {
-    "exposure": -2,       # Example -2 (bright) -11(dark)
+    "exposure": 100,       # Example -2 (bright) -11(dark)
     "brightness": 0,      # Example -130 (dark) +130(bright)
     "contrast": 130,      # Example -130 (dark) +130(bright)
     "focus": 0,           # Example 0 - 500
@@ -82,8 +82,7 @@ print(" p   : SAVE current profile to JSON")
 print(" o   : LOAD profile from JSON")
 print(" q   : exit the application")
 
-vid.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-vid.set(cv2.CAP_PROP_GAIN,0)
+vid.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 
 while(True):
     if live_feed:
@@ -175,11 +174,11 @@ while(True):
 
     # CONTRAST
     if key == ord('x'):
-        settings["contrast"]+=10
+        settings["contrast"]+=1
         print(f'contrast: {settings["contrast"]}')
         vid.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
     if key == ord('c'):
-        settings["contrast"]-=10
+        settings["contrast"]-=1
         print(f'contrast: {settings["contrast"]}')
         vid.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
 

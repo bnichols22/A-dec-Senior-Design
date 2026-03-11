@@ -508,6 +508,12 @@ def main():
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
+                if key == ord('c'):
+                    CAMERA_PROFILE_NAME = "wide_angle_full_light_on.json"
+                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
+                if key == ord('d'):
+                    CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
+                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
             else:
                 # No UI window: cannot read 'c' reliably, so just keep holding.
                 pass
@@ -565,6 +571,12 @@ def main():
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
+                if key == ord('c'):
+                    CAMERA_PROFILE_NAME = "wide_angle_full_light_on.json"
+                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
+                if key == ord('d'):
+                    CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
+                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
             # Go back to top of while loop
             continue
 
@@ -642,8 +654,8 @@ def main():
         speeds = vel_h.values()
         vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
 
-        # If this is 0, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
-        too_wild = (vel_med > VEL_THRESH_DEG_S * 2.0) or (pos_std > POS_STD_THRESH_PX * 2.0)
+        # If this is 1, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
+        too_wild = (vel_med > VEL_THRESH_DEG_S * 100.0) or (pos_std > POS_STD_THRESH_PX * 100.0)
 
         ###                                                                                      ###
 

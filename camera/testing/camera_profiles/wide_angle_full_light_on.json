@@ -1,8 +1,8 @@
 {
-    "exposure": -11.0,
-    "brightness": -70,
-    "contrast": 0,
-    "focus": 210,
+    "exposure": 30.0,
+    "brightness": 250,
+    "contrast": 11,
+    "focus": 310,
     "white_balance": 4600,
     "camera_id": 0
 }
