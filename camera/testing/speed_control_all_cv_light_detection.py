@@ -117,18 +117,17 @@ RANGE_SWITCH_FRAMES = 8
 
 
 # ==============================================================
-# NEW: Auto profile switching based on washout / dark detection
+# NEW: Auto profile switching based on washout detection
 # ==============================================================
-PROFILE_LIGHT_ON = os.path.join(BASE_DIR, "wide_angle_full_light_on.json")
+PROFILE_LIGHT_ON  = os.path.join(BASE_DIR, "wide_angle_full_light_on.json")
 PROFILE_LIGHT_OFF = os.path.join(BASE_DIR, "wide_angle_full_light_off.json")
 
-# Washed-out scene thresholds
+# Bright pixel threshold and ratio for washout detection
 WASHOUT_PIXEL_THRESHOLD = 245
-WASHOUT_RATIO_THRESHOLD = 0.12
+WASHOUT_RATIO_THRESHOLD = 0.010
 
-# Fully-dark scene thresholds
-DARK_PIXEL_THRESHOLD = 20
-DARK_RATIO_THRESHOLD = 0.98
+# Require multiple consecutive frames before switching profiles
+PROFILE_SWITCH_CONFIRM_FRAMES = 5
 
 
 # ---------------- Helper Functions ----------------
@@ -228,61 +227,69 @@ def update_camera_settings(camera, filename):
         return None
 
     # If a camera doesn't support a property, cv2 usually just ignores it or returns false.
+    if "auto_exposure" in current_settings:
+        camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, current_settings["auto_exposure"])
     if "exposure" in current_settings:
         camera.set(cv2.CAP_PROP_EXPOSURE, current_settings["exposure"])
     if "brightness" in current_settings:
         camera.set(cv2.CAP_PROP_BRIGHTNESS, current_settings["brightness"])
     if "contrast" in current_settings:
         camera.set(cv2.CAP_PROP_CONTRAST, current_settings["contrast"])
+    if "gain" in current_settings:
+        camera.set(cv2.CAP_PROP_GAIN, current_settings["gain"])
+    if "saturation" in current_settings:
+        camera.set(cv2.CAP_PROP_SATURATION, current_settings["saturation"])
 
     return current_settings
 
-def classify_frame_lighting(frame):
+def classify_washout(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
     bright_ratio = float((gray >= WASHOUT_PIXEL_THRESHOLD).sum()) / float(gray.size)
-    dark_ratio = float((gray <= DARK_PIXEL_THRESHOLD).sum()) / float(gray.size)
-
-    is_washed_out = bright_ratio >= WASHOUT_RATIO_THRESHOLD
-    is_fully_dark = dark_ratio >= DARK_RATIO_THRESHOLD
-
-    if is_washed_out:
-        visual_state = "WASHED_OUT"
-    elif is_fully_dark:
-        visual_state = "DARK"
-    else:
-        visual_state = "NORMAL"
-
-    return visual_state, bright_ratio, dark_ratio
+    washed_out = bright_ratio >= WASHOUT_RATIO_THRESHOLD
+    return washed_out, bright_ratio
 
 def handle_washout_profile_switch(camera, frame, profile_state):
     """
-    Detect washout / full-dark frame states and only switch camera profile
-    once when the state changes.
+    Detect washed-out vs not-washed-out frame states and only switch camera
+    profile once when the state changes and has been stable for several frames.
 
     profile_state keys:
       - loaded_profile
-      - prev_visual_state
+      - visual_mode
+      - pending_visual_mode
+      - pending_count
     """
-    visual_state, bright_ratio, dark_ratio = classify_frame_lighting(frame)
-    prev_visual_state = profile_state["prev_visual_state"]
-    loaded_profile = profile_state["loaded_profile"]
+    washed_out, bright_ratio = classify_washout(frame)
+    desired_mode = "WASHED_OUT" if washed_out else "NOT_WASHED_OUT"
 
-    if visual_state != prev_visual_state:
-        if visual_state == "WASHED_OUT":
-            if loaded_profile != "LIGHT_ON":
-                settings = update_camera_settings(camera, PROFILE_LIGHT_ON)
-                if settings is not None:
-                    profile_state["loaded_profile"] = "LIGHT_ON"
+    if desired_mode != profile_state["visual_mode"]:
+        if desired_mode != profile_state["pending_visual_mode"]:
+            profile_state["pending_visual_mode"] = desired_mode
+            profile_state["pending_count"] = 1
+        else:
+            profile_state["pending_count"] += 1
 
-        elif visual_state == "DARK":
-            if loaded_profile != "LIGHT_OFF":
-                settings = update_camera_settings(camera, PROFILE_LIGHT_OFF)
-                if settings is not None:
-                    profile_state["loaded_profile"] = "LIGHT_OFF"
+        if profile_state["pending_count"] >= PROFILE_SWITCH_CONFIRM_FRAMES:
+            profile_state["visual_mode"] = desired_mode
+            profile_state["pending_visual_mode"] = None
+            profile_state["pending_count"] = 0
 
-    profile_state["prev_visual_state"] = visual_state
-    return visual_state, bright_ratio, dark_ratio
+            if desired_mode == "WASHED_OUT":
+                if profile_state["loaded_profile"] != "LIGHT_ON":
+                    settings = update_camera_settings(camera, PROFILE_LIGHT_ON)
+                    if settings is not None:
+                        profile_state["loaded_profile"] = "LIGHT_ON"
+            else:
+                if profile_state["loaded_profile"] != "LIGHT_OFF":
+                    settings = update_camera_settings(camera, PROFILE_LIGHT_OFF)
+                    if settings is not None:
+                        profile_state["loaded_profile"] = "LIGHT_OFF"
+    else:
+        profile_state["pending_visual_mode"] = None
+        profile_state["pending_count"] = 0
+
+    return desired_mode, bright_ratio
+
 
 # ----------------------------------------------------------------------
 # SBGC shim bindings (ctypes)
@@ -386,6 +393,9 @@ def main():
     # Set the max number of stored frames allowed
     capture_dev.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
 
+    # Start in the light-off profile as a default
+    update_camera_settings(capture_dev, PROFILE_LIGHT_OFF)
+
     # Clear test log
     try:
         with open(LOG_PATH, "w") as log_file:
@@ -439,8 +449,10 @@ def main():
     # NEW: Auto camera profile state
     # ==============================================================
     profile_state = {
-        "loaded_profile": None,
-        "prev_visual_state": "UNKNOWN",
+        "loaded_profile": "LIGHT_OFF",
+        "visual_mode": "UNKNOWN",
+        "pending_visual_mode": None,
+        "pending_count": 0,
     }
 
     # GPIO 6 pushbutton input (internal pull-up)
@@ -534,8 +546,7 @@ def main():
             if anchor is None:
                 anchor = (frame_width / 2.0, frame_height / 2.0)
 
-            # NEW: automatic profile switching based on scene brightness state
-            visual_state, bright_ratio, dark_ratio = handle_washout_profile_switch(
+            visual_state, bright_ratio = handle_washout_profile_switch(
                 capture_dev, frame, profile_state
             )
 
@@ -566,7 +577,7 @@ def main():
                     cv2.putText(frame, msg, (10, 28),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
-                    cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f} dark={dark_ratio:.3f}", (10, 54),
+                    cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f}", (10, 54),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
                     cv2.putText(frame, f"profile:{profile_state['loaded_profile']}", (10, 80),
@@ -632,7 +643,7 @@ def main():
                     prev_time = None
 
                 if DRAW_FRAME_RT:
-                    cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f} dark={dark_ratio:.3f}", (10, 24),
+                    cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f}", (10, 24),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
                     cv2.putText(frame, f"profile:{profile_state['loaded_profile']}", (10, 48),
@@ -734,7 +745,6 @@ def main():
                 if within_stop_threshold:
                     state = LOCKED
 
-
             # Comput the speed commands to send
             if state == SEEKING and not too_wild:
                 err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
@@ -746,7 +756,6 @@ def main():
                     err_yaw_deg = 0.0
                 if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
                     err_pitch_deg = 0.0
-
 
                 yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
                 pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
@@ -774,7 +783,8 @@ def main():
             # Only print telemetry if desired
             if PRINT_TELEMETRY:
                 eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} scene={visual_state} bright={bright_ratio:.3f} dark={dark_ratio:.3f} profile={profile_state['loaded_profile']}")
+                state_txt = "LOCKED" if state == LOCKED else "SEEKING"
+                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state_txt} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} scene={visual_state} bright={bright_ratio:.3f} profile={profile_state['loaded_profile']}")
 
             # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
             if DRAW_FRAME_RT:
@@ -799,7 +809,7 @@ def main():
                 cv2.putText(frame, f"eye_px={eye_str} box={stable_scalar:.3f} {stable_range}", (10, 72),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
 
-                cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f} dark={dark_ratio:.3f}", (10, 96),
+                cv2.putText(frame, f"scene:{visual_state} bright={bright_ratio:.3f}", (10, 96),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
                 cv2.putText(frame, f"profile:{profile_state['loaded_profile']}", (10, 120),
