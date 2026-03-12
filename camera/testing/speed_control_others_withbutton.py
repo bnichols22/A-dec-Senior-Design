@@ -71,7 +71,7 @@ DEADBAND_DEG_YAW   = 0.25
 DEADBAND_DEG_PITCH = 0.25
 
 # Command streaming rate (Hz)
-COMMAND_HZ = 150.0
+COMMAND_HZ = 500.0
 COMMAND_PERIOD = 1.0 / COMMAND_HZ
 
 # Smooth commanded speeds (0=no smoothing, 1=very slow)

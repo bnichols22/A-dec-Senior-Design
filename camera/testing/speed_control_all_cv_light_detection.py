@@ -119,18 +119,19 @@ RANGE_SWITCH_FRAMES = 8
 # ==============================================================
 # NEW: Auto profile switching based on washout detection
 # ==============================================================
-PROFILE_LIGHT_ON  = os.path.join(BASE_DIR, "wide_angle_full_light_on.json")
-PROFILE_LIGHT_OFF = os.path.join(BASE_DIR, "wide_angle_full_light_off.json")
+CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
+PROFILE_LIGHT_ON = os.path.join(CAMERA_PROFILE_DIR, "wide_angle_full_light_on.json")
+PROFILE_LIGHT_OFF = os.path.join(CAMERA_PROFILE_DIR, "wide_angle_full_light_off.json")
 
 # Bright pixel threshold and ratio for washout detection
-WASHOUT_PIXEL_THRESHOLD = 245
+WASHOUT_PIXEL_THRESHOLD = 100
 
 # Hysteresis thresholds:
 # - enter washed-out mode only when bright_ratio rises above ENTER threshold
 # - leave washed-out mode only when bright_ratio falls below EXIT threshold
 # EXIT threshold should be LOWER than ENTER threshold to prevent chatter
-WASHOUT_ENTER_RATIO = 0.012
-WASHOUT_EXIT_RATIO  = 0.004
+WASHOUT_ENTER_RATIO = 0.02
+WASHOUT_EXIT_RATIO  = 0.0045
 
 # Require multiple consecutive frames before switching profiles
 PROFILE_SWITCH_CONFIRM_FRAMES = 4
@@ -236,20 +237,12 @@ def update_camera_settings(camera, filename):
         return None
 
     # If a camera doesn't support a property, cv2 usually just ignores it or returns false.
-    if "auto_exposure" in current_settings:
-        camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, current_settings["auto_exposure"])
     if "exposure" in current_settings:
         camera.set(cv2.CAP_PROP_EXPOSURE, current_settings["exposure"])
     if "brightness" in current_settings:
         camera.set(cv2.CAP_PROP_BRIGHTNESS, current_settings["brightness"])
     if "contrast" in current_settings:
         camera.set(cv2.CAP_PROP_CONTRAST, current_settings["contrast"])
-    if "gain" in current_settings:
-        camera.set(cv2.CAP_PROP_GAIN, current_settings["gain"])
-    if "saturation" in current_settings:
-        camera.set(cv2.CAP_PROP_SATURATION, current_settings["saturation"])
-
-    return current_settings
 
 def measure_bright_ratio(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
