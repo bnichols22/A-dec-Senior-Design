@@ -26,6 +26,9 @@ import mediapipe as mp
 from collections import deque
 import lgpio
 import json
+import board
+import busio
+from adafruit_ads1x15 import ADS1115, AnalogIn, ads1x15
 
 # --------- Paths and Filename ----------
 file_name = "speed_control_compliance_dynbox.py"
@@ -117,6 +120,25 @@ STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
 
 # Prevent flicker: require N consecutive frames to accept a new range
 RANGE_SWITCH_FRAMES = 8
+
+# ==============================================================
+# NEW: Light mode ADC config
+# ==============================================================
+LIGHT_MODE_THRESHOLD_VOLTS = 0.8
+
+LIGHT_OFF_MODE     = "LIGHT_OFF"
+YELLOW_LIGHT_MODE  = "YELLOW_LIGHT"
+LOWEST_LIGHT_MODE  = "LOWEST_LIGHT"
+MEDIUM_LIGHT_MODE  = "MEDIUM_LIGHT"
+HIGHEST_LIGHT_MODE = "HIGHEST_LIGHT"
+
+LIGHT_MODE_TO_PROFILE = {
+    HIGHEST_LIGHT_MODE: "wide_angle_full_light_on.json",
+    MEDIUM_LIGHT_MODE:  "wide_angle_medium_light_on.json",
+    LOWEST_LIGHT_MODE:  "wide_angle_low_light_on.json",
+    YELLOW_LIGHT_MODE:  "wide_angle_yellow_light_on.json",
+    LIGHT_OFF_MODE:     "wide_angle_light_off.json",
+}
 
 
 # ---------------- Helper Functions ----------------
@@ -229,7 +251,6 @@ def handle_mode_cycle(mode, prev_smoothed, prev_time, consecutive_lost_frames, s
 # If the histogram was removed, this coudl be deleted
 class TimedHistogram:
 
-
     def __init__(self, win_sec):
         self.win = win_sec
         self.buf = deque()
@@ -258,13 +279,63 @@ def update_camera_settings(camera, filename, profile_dir):
 
         with open(profile_path, 'r') as f:
             camera_settings = json.load(f)
+
         # If a camera doesn't support a property, cv2 usually just ignores it or returns false.
-        camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
-        camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])
-        camera.set(cv2.CAP_PROP_CONTRAST, camera_settings["contrast"])
+        if "auto_exposure" in camera_settings:
+            camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, camera_settings["auto_exposure"])
+        if "exposure" in camera_settings:
+            camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
+        if "brightness" in camera_settings:
+            camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])
+        if "contrast" in camera_settings:
+            camera.set(cv2.CAP_PROP_CONTRAST, camera_settings["contrast"])
+        if "gain" in camera_settings:
+            camera.set(cv2.CAP_PROP_GAIN, camera_settings["gain"])
+        if "saturation" in camera_settings:
+            camera.set(cv2.CAP_PROP_SATURATION, camera_settings["saturation"])
+
         print(f"Loaded camera profile: {profile_path}")
+        return True
     except Exception as camera_update_error:
         print(f"Error loading profile: {camera_update_error}")
+        return False
+
+def read_light_mode(adc_channels, off_threshold_volts):
+    v0 = adc_channels["A0"].voltage
+    v1 = adc_channels["A1"].voltage
+    v2 = adc_channels["A2"].voltage
+    v3 = adc_channels["A3"].voltage
+
+    voltage_map = {
+        YELLOW_LIGHT_MODE:  v0,
+        LOWEST_LIGHT_MODE:  v1,
+        MEDIUM_LIGHT_MODE:  v2,
+        HIGHEST_LIGHT_MODE: v3,
+    }
+
+    active_modes = {mode_name: voltage for mode_name, voltage in voltage_map.items() if voltage >= off_threshold_volts}
+
+    if not active_modes:
+        return LIGHT_OFF_MODE, (v0, v1, v2, v3)
+
+    selected_mode = max(active_modes, key=active_modes.get)
+    return selected_mode, (v0, v1, v2, v3)
+
+def update_camera_profile_from_light_mode(camera, current_light_mode, previous_light_mode, profile_dir):
+    if current_light_mode == previous_light_mode:
+        return previous_light_mode
+
+    profile_filename = LIGHT_MODE_TO_PROFILE.get(current_light_mode)
+    if profile_filename is None:
+        print(f"Warning: No profile mapped for light mode {current_light_mode}")
+        return previous_light_mode
+
+    profile_loaded = update_camera_settings(camera, profile_filename, profile_dir)
+    if profile_loaded:
+        print(f"Light mode changed: {previous_light_mode} -> {current_light_mode}")
+        return current_light_mode
+
+    return previous_light_mode
 
 
 # ----------------------------------------------------------------------
@@ -366,8 +437,26 @@ def main():
         # Exit here because we cannot run without camera
         sys.exit(1)
 
-    CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
-    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
+    # Create ADC object and channels
+    i2c = busio.I2C(board.SCL, board.SDA)
+    ads = ADS1115(i2c)
+    ads.gain = 1
+
+    adc_channels = {
+        "A0": AnalogIn(ads, ads1x15.Pin.A0),
+        "A1": AnalogIn(ads, ads1x15.Pin.A1),
+        "A2": AnalogIn(ads, ads1x15.Pin.A2),
+        "A3": AnalogIn(ads, ads1x15.Pin.A3),
+    }
+
+    current_light_mode = LIGHT_OFF_MODE
+    previous_light_mode = None
+    previous_light_mode = update_camera_profile_from_light_mode(
+        face_track_cam,
+        current_light_mode,
+        previous_light_mode,
+        CAMERA_PROFILE_DIR
+    )
 
     # Set the max number of stored frames allowed
     face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
@@ -456,6 +545,15 @@ def main():
         current_time = time.time()
         frame_height, frame_width = frame.shape[:2]
 
+        # Update camera profile from ADC light mode every loop
+        current_light_mode, light_mode_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
+        previous_light_mode = update_camera_profile_from_light_mode(
+            face_track_cam,
+            current_light_mode,
+            previous_light_mode,
+            CAMERA_PROFILE_DIR
+        )
+
         if anchor is None:
             anchor = (frame_width / 2.0, frame_height / 2.0)
 
@@ -481,7 +579,7 @@ def main():
                     HOLD_MOTORS_ON_NO_TRACK,
                     LOCKED
                 )
-                
+
         # Handle compliance/hold modes before doing face tracking
         if mode != TRACKING_ENABLED:
             # In these modes, we do NOT compute face tracking commands.
@@ -503,17 +601,13 @@ def main():
 
                 cv2.putText(frame, msg, (10, 28),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+                cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 56),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
                 cv2.imshow(f"Image playback using: {file_name}", frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
-                if key == ord('c'):
-                    CAMERA_PROFILE_NAME = "wide_angle_full_light_on.json"
-                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
-                if key == ord('d'):
-                    CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
-                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
             else:
                 # No UI window: cannot read 'c' reliably, so just keep holding.
                 pass
@@ -567,16 +661,12 @@ def main():
                 prev_time = None
 
             if DRAW_FRAME_RT:
+                cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
                 cv2.imshow(f"Image playback using: {file_name}", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
-                if key == ord('c'):
-                    CAMERA_PROFILE_NAME = "wide_angle_full_light_on.json"
-                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
-                if key == ord('d'):
-                    CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
-                    update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
             # Go back to top of while loop
             continue
 
@@ -667,7 +757,6 @@ def main():
             if within_stop_threshold:
                 state = LOCKED
 
-
         # Comput the speed commands to send
         if state == SEEKING and not too_wild:
             err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
@@ -679,7 +768,6 @@ def main():
                 err_yaw_deg = 0.0
             if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
                 err_pitch_deg = 0.0
-
 
             yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
             pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
@@ -707,7 +795,7 @@ def main():
         # Only print telemetry if desired
         if PRINT_TELEMETRY:
             eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range}")
+            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
 
         # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
         if DRAW_FRAME_RT:
@@ -732,20 +820,17 @@ def main():
             cv2.putText(frame, f"eye_px={eye_str} box={stable_scalar:.3f} {stable_range}", (10, 72),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
 
-            cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 96),
+            cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 96),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+
+            cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
             cv2.imshow(f"Image playback using: {file_name}", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 break
-            if key == ord('c'):
-                CAMERA_PROFILE_NAME = "wide_angle_full_light_on.json"
-                update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
-            if key == ord('d'):
-                CAMERA_PROFILE_NAME = "wide_angle_full_light_off.json"
-                update_camera_settings(face_track_cam, CAMERA_PROFILE_NAME, CAMERA_PROFILE_DIR)
-                
+
     # stop motion on exit
     try:
         # Send a hold command to the motors
