@@ -1,7 +1,4 @@
 // simplebgc_shim.c
-// Minimal shim around SimpleBGC SerialAPI for use from Python (ctypes).
-// Supports absolute ANGLE control + SPEED control + reading current angles.
-
 #include <string.h>
 #include <stdint.h>
 #include "sbgc32.h"
@@ -20,7 +17,6 @@ int bgc_init(void)
     if (st != sbgcCOMMAND_OK)
         return (int)st;
 
-    // ----- ControlConfig -----
     memset(&gCtrlCfg, 0, sizeof(gCtrlCfg));
 
     gCtrlCfg.AxisCCtrl[ROLL].angleLPF  = 2;
@@ -37,7 +33,6 @@ int bgc_init(void)
     if (st != sbgcCOMMAND_OK)
         return (int)st;
 
-    // ----- Control object -----
     memset(&gCtrl, 0, sizeof(gCtrl));
 
     gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
@@ -48,7 +43,6 @@ int bgc_init(void)
     gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(0.0f);
     gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(0.0f);
 
-    // IMPORTANT: keep reasonable nonzero speed limits for angle mode
     gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(30.0f);
     gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(30.0f);
     gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(60.0f);
@@ -69,9 +63,6 @@ int bgc_set_motors(int on)
     return (int)st;
 }
 
-// Absolute-angle control.
-// IMPORTANT: restore nonzero speeds here too, because speed mode may
-// have previously left these fields at zero.
 int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
 {
     gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
@@ -82,7 +73,6 @@ int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
     gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(pitch_deg);
     gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(yaw_deg);
 
-    // Reapply nonzero speed limits every time angle mode is used
     gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(30.0f);
     gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(30.0f);
     gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(60.0f);
@@ -90,7 +80,6 @@ int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
     return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
 
-// Speed control in deg/sec for all three axes.
 int bgc_control_speeds(float roll_dps, float pitch_dps, float yaw_dps)
 {
     gCtrl.mode[ROLL]  = CtrlMODE_SPEED;
@@ -104,7 +93,6 @@ int bgc_control_speeds(float roll_dps, float pitch_dps, float yaw_dps)
     return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
 
-// Read current IMU angles (actual gimbal attitude) in degrees.
 int bgc_get_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
 {
     sbgcCommandStatus_t st;
@@ -125,7 +113,6 @@ int bgc_get_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
     return 0;
 }
 
-// Read controller target angles in degrees.
 int bgc_get_target_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
 {
     sbgcCommandStatus_t st;
