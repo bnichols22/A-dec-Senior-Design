@@ -11,7 +11,7 @@ i2c = busio.I2C(board.SCL, board.SDA)
 ads = ADS1115(i2c)
 
 # Set gain for small voltages
-ads.gain = 16
+ads.gain = 1
 
 # Create channels
 ch0 = AnalogIn(ads, ads1x15.Pin.A0)
@@ -26,4 +26,4 @@ while True:
         f"A2: {ch2.voltage:.5f} V | "
         f"A3: {ch3.voltage:.5f} V"
     )
-    time.sleep(0.5)
+    time.sleep(2)

@@ -98,25 +98,21 @@ def main():
         ]
 
         for idx, (cmd_r, cmd_p, cmd_y) in enumerate(tests, start=1):
-            print(f"\n=== Test {idx} ===")
-            print(f"Commanding angles: roll={cmd_r:.2f}, pitch={cmd_p:.2f}, yaw={cmd_y:.2f}")
 
             command_angles(cmd_r, cmd_p, cmd_y)
 
             # Give the controller some time to react
-            time.sleep(1.5)
+            time.sleep(8)
 
-            for sample_idx in range(10):
-                tgt_r, tgt_p, tgt_y = get_target_angles()
-                cur_r, cur_p, cur_y = get_angles()
+            
+            tgt_r, tgt_p, tgt_y = get_target_angles()
+            cur_r, cur_p, cur_y = get_angles()
 
-                print(
-                    f"[{sample_idx:02d}] "
-                    f"CMD    = ({cmd_r:+7.2f}, {cmd_p:+7.2f}, {cmd_y:+7.2f}) | "
-                    f"TARGET = ({tgt_r:+7.2f}, {tgt_p:+7.2f}, {tgt_y:+7.2f}) | "
-                    f"READ   = ({cur_r:+7.2f}, {cur_p:+7.2f}, {cur_y:+7.2f})"
-                )
-                time.sleep(0.2)
+            print(
+                f"CMD    = ({cmd_r:+7.2f}, {cmd_p:+7.2f}, {cmd_y:+7.2f})\n"
+                f"TARGET = ({tgt_r:+7.2f}, {tgt_p:+7.2f}, {tgt_y:+7.2f})\n"
+                f"READ   = ({cur_r:+7.2f}, {cur_p:+7.2f}, {cur_y:+7.2f})\n"
+            )
 
     finally:
         try:

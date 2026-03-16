@@ -38,7 +38,7 @@ def read_light_mode():
     if v3 >= OFF_THRESHOLD:
         return "HIGHEST_LIGHT"
 
-    return "NONE"
+    return "LIGHT_OFF"
 
 
 while True:
@@ -46,11 +46,7 @@ while True:
     mode = read_light_mode()
 
     print(
-        f"A0={ch0.voltage:.3f}V "
-        f"A1={ch1.voltage:.3f}V "
-        f"A2={ch2.voltage:.3f}V "
-        f"A3={ch3.voltage:.3f}V "
         f"MODE={mode}"
     )
 
-    time.sleep(1)
+    time.sleep(2)
