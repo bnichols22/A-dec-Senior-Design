@@ -44,13 +44,14 @@ int bgc_init(void)
     gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
 
-    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(0);
-    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(0);
-    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(0);
+    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(0.0f);
+    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(0.0f);
+    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(0.0f);
 
-    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(25.0f);
-    gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(25.0f);
-    gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(50.0f);
+    // IMPORTANT: keep reasonable nonzero speed limits for angle mode
+    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(30.0f);
+    gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(30.0f);
+    gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(60.0f);
 
     st = SBGC32_SetMotorsON(&gSBGC, &gConfirm);
     return (int)st;
@@ -69,7 +70,8 @@ int bgc_set_motors(int on)
 }
 
 // Absolute-angle control.
-// FIXED: use sbgcDegreeToAngle() for degrees -> internal units.
+// IMPORTANT: restore nonzero speeds here too, because speed mode may
+// have previously left these fields at zero.
 int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
 {
     gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
@@ -79,6 +81,11 @@ int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
     gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(roll_deg);
     gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(pitch_deg);
     gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(yaw_deg);
+
+    // Reapply nonzero speed limits every time angle mode is used
+    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(30.0f);
+    gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(30.0f);
+    gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(60.0f);
 
     return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
