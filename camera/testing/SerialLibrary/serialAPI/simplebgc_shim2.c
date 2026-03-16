@@ -63,22 +63,22 @@ int bgc_set_motors(int on)
     return (int)st;
 }
 
+// Existing absolute-angle control (kept exactly in spirit).
 int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
 {
+    // NOTE: This naming in the vendor lib is confusing, but your demo uses sbgcAngleToDegree(x_degrees)
+    // for degree->internal conversion, so we keep it consistent with that style.
     gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[PITCH] = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
     gCtrl.mode[YAW]   = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
 
-    gCtrl.AxisC[ROLL].angle  = sbgcDegreeToAngle(roll_deg);
-    gCtrl.AxisC[PITCH].angle = sbgcDegreeToAngle(pitch_deg);
-    gCtrl.AxisC[YAW].angle   = sbgcDegreeToAngle(yaw_deg);
-
-    gCtrl.AxisC[ROLL].speed  = sbgcSpeedToValue(30.0f);
-    gCtrl.AxisC[PITCH].speed = sbgcSpeedToValue(30.0f);
-    gCtrl.AxisC[YAW].speed   = sbgcSpeedToValue(60.0f);
+    gCtrl.AxisC[ROLL].angle  = sbgcAngleToDegree((int16_t)roll_deg);
+    gCtrl.AxisC[PITCH].angle = sbgcAngleToDegree((int16_t)pitch_deg);
+    gCtrl.AxisC[YAW].angle   = sbgcAngleToDegree((int16_t)yaw_deg);
 
     return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
+
 
 int bgc_control_speeds(float roll_dps, float pitch_dps, float yaw_dps)
 {
