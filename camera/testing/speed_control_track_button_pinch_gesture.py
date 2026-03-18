@@ -31,7 +31,7 @@ import busio
 from adafruit_ads1x15 import ADS1115, AnalogIn, ads1x15
 
 # --------- Paths and Filename ----------
-file_name = "speed_control_compliance_dynbox.py"
+file_name = "full_speed_track_button_pinch_gesture.py"
 BASE_DIR = os.path.expanduser('~/senior_design/A-dec-Senior-Design/camera/testing')
 os.makedirs(BASE_DIR, exist_ok=True)
 
@@ -140,6 +140,13 @@ LIGHT_MODE_TO_PROFILE = {
     LIGHT_OFF_MODE:     "wide_angle_light_off.json",
 }
 
+GESTURE_TRACK_MOUTH = 0
+GESTURE_TRACK_PINCH = 1
+GESTURE_HOLD_AFTER_PINCH = 2
+
+PINCH_ENTER_FRAMES = 3
+THUMBS_UP_ENTER_FRAMES = 3
+PINCH_DISTANCE_RATIO = 0.45
 
 # ---------------- Helper Functions ----------------
 
@@ -248,7 +255,6 @@ def handle_mode_cycle(mode, prev_smoothed, prev_time, consecutive_lost_frames, s
     state = LOCKED
     return mode, prev_smoothed, prev_time, consecutive_lost_frames, state
 
-# If the histogram was removed, this coudl be deleted
 class TimedHistogram:
 
     def __init__(self, win_sec):
@@ -337,6 +343,56 @@ def update_camera_profile_from_light_mode(camera, current_light_mode, previous_l
 
     return previous_light_mode
 
+def landmark_to_pixel(landmark, frame_width, frame_height):
+    return (landmark.x * frame_width, landmark.y * frame_height)
+
+def detect_hand_gestures(hand_results, frame_width, frame_height):
+    pinch_detected = False
+    pinch_point = None
+    thumbs_up_detected = False
+    best_pinch_ratio = 999.0
+
+    if not hand_results.multi_hand_landmarks:
+        return pinch_detected, pinch_point, thumbs_up_detected
+
+    for hand_landmarks in hand_results.multi_hand_landmarks:
+        lm = hand_landmarks.landmark
+
+        thumb_tip = landmark_to_pixel(lm[4], frame_width, frame_height)
+        thumb_ip = landmark_to_pixel(lm[3], frame_width, frame_height)
+        thumb_mcp = landmark_to_pixel(lm[2], frame_width, frame_height)
+        index_tip = landmark_to_pixel(lm[8], frame_width, frame_height)
+        index_pip = landmark_to_pixel(lm[6], frame_width, frame_height)
+        index_mcp = landmark_to_pixel(lm[5], frame_width, frame_height)
+        middle_tip = landmark_to_pixel(lm[12], frame_width, frame_height)
+        middle_pip = landmark_to_pixel(lm[10], frame_width, frame_height)
+        ring_tip = landmark_to_pixel(lm[16], frame_width, frame_height)
+        ring_pip = landmark_to_pixel(lm[14], frame_width, frame_height)
+        pinky_tip = landmark_to_pixel(lm[20], frame_width, frame_height)
+        pinky_pip = landmark_to_pixel(lm[18], frame_width, frame_height)
+        pinky_mcp = landmark_to_pixel(lm[17], frame_width, frame_height)
+
+        palm_width = max(1.0, math.hypot(index_mcp[0] - pinky_mcp[0], index_mcp[1] - pinky_mcp[1]))
+        pinch_distance = math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1])
+        pinch_ratio = pinch_distance / palm_width
+
+        if pinch_ratio < PINCH_DISTANCE_RATIO and pinch_ratio < best_pinch_ratio:
+            best_pinch_ratio = pinch_ratio
+            pinch_detected = True
+            pinch_point = ((thumb_tip[0] + index_tip[0]) / 2.0, (thumb_tip[1] + index_tip[1]) / 2.0)
+
+        thumb_up = (
+            thumb_tip[1] < thumb_ip[1] < thumb_mcp[1] and
+            index_tip[1] > index_pip[1] and
+            middle_tip[1] > middle_pip[1] and
+            ring_tip[1] > ring_pip[1] and
+            pinky_tip[1] > pinky_pip[1]
+        )
+        if thumb_up:
+            thumbs_up_detected = True
+
+    return pinch_detected, pinch_point, thumbs_up_detected
+
 
 # ----------------------------------------------------------------------
 # SBGC shim bindings (ctypes)
@@ -384,7 +440,6 @@ def send_speeds(roll_dps, pitch_dps, yaw_dps):
         print("send_speeds: cannot send because lib is not initialied or setup")
         return False
 
-    # send the speeds to the motors
     status_code = motor_library.bgc_control_speeds(
         ctypes.c_float(roll_dps),
         ctypes.c_float(pitch_dps),
@@ -424,10 +479,21 @@ def main():
     init_sbgc()
 
     mp_face_mesh = mp.solutions.face_mesh
+    mp_hands = mp.solutions.hands
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+
     # Can adjust confidence as and detection as needed
     face_mesh = mp_face_mesh.FaceMesh(
         static_image_mode=False, max_num_faces=1, refine_landmarks=True,
         min_detection_confidence=0.5, min_tracking_confidence=0.5
+    )
+
+    hands = mp_hands.Hands(
+        model_complexity=0,
+        max_num_hands=2,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
     )
 
     # Create capture device object and verify it constructed
@@ -509,6 +575,11 @@ def main():
     pending_range = None
     pending_count = 0
     stable_scalar = STABLE_SCALAR_DEFAULT
+
+    gesture_mode = GESTURE_TRACK_MOUTH
+    pinch_counter = 0
+    thumbs_up_counter = 0
+    pinch_point = None
 
     # GPIO 6 pushbutton input (internal pull-up)
     BUTTON_PIN = 6
@@ -620,6 +691,41 @@ def main():
         rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         # process the image and set landmarks
         processed_image = face_mesh.process(rgb_frame_cap)
+        hand_results = hands.process(rgb_frame_cap)
+
+        pinch_detected, pinch_point_candidate, thumbs_up_detected = detect_hand_gestures(
+            hand_results,
+            frame_width,
+            frame_height
+        )
+
+        if gesture_mode == GESTURE_TRACK_MOUTH:
+            if pinch_detected and pinch_point_candidate is not None:
+                pinch_counter += 1
+                if pinch_counter >= PINCH_ENTER_FRAMES:
+                    gesture_mode = GESTURE_TRACK_PINCH
+                    pinch_point = pinch_point_candidate
+            else:
+                pinch_counter = 0
+
+        elif gesture_mode == GESTURE_TRACK_PINCH:
+            if pinch_detected and pinch_point_candidate is not None:
+                pinch_point = pinch_point_candidate
+            else:
+                gesture_mode = GESTURE_HOLD_AFTER_PINCH
+                pinch_counter = 0
+                thumbs_up_counter = 0
+
+        elif gesture_mode == GESTURE_HOLD_AFTER_PINCH:
+            if thumbs_up_detected:
+                thumbs_up_counter += 1
+                if thumbs_up_counter >= THUMBS_UP_ENTER_FRAMES:
+                    gesture_mode = GESTURE_TRACK_MOUTH
+                    thumbs_up_counter = 0
+                    pinch_counter = 0
+                    pinch_point = None
+            else:
+                thumbs_up_counter = 0
 
         centroid = None
         eye_dist_px = None
@@ -647,6 +753,37 @@ def main():
             # Get distance proximity for dynamic stable-box sizing
             eye_dist_px = estimate_eye_dist_px(patient_face, frame_width, frame_height)
 
+        if gesture_mode == GESTURE_TRACK_PINCH and pinch_point is not None:
+            centroid = pinch_point
+
+        if gesture_mode == GESTURE_HOLD_AFTER_PINCH:
+            if (current_time - last_send_time) >= COMMAND_PERIOD:
+                send_speeds(0.0, 0.0, 0.0)
+                last_send_time = current_time
+
+            if DRAW_FRAME_RT:
+                if hand_results.multi_hand_landmarks:
+                    for hand_landmarks in hand_results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(
+                            frame,
+                            hand_landmarks,
+                            mp_hands.HAND_CONNECTIONS,
+                            mp_drawing_styles.get_default_hand_landmarks_style(),
+                            mp_drawing_styles.get_default_hand_connections_style()
+                        )
+
+                cv2.putText(frame, "gesture:HOLD_AFTER_PINCH", (10, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2, cv2.LINE_AA)
+                cv2.putText(frame, "thumbs up to resume mouth tracking", (10, 48),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2, cv2.LINE_AA)
+                cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 72),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+                cv2.imshow(f"Image playback using: {file_name}", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:
+                    break
+            continue
+
         # Handle if no centroid was found
         if centroid is None:
             consecutive_lost_frames += 1
@@ -661,6 +798,16 @@ def main():
                 prev_time = None
 
             if DRAW_FRAME_RT:
+                if hand_results.multi_hand_landmarks:
+                    for hand_landmarks in hand_results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(
+                            frame,
+                            hand_landmarks,
+                            mp_hands.HAND_CONNECTIONS,
+                            mp_drawing_styles.get_default_hand_landmarks_style(),
+                            mp_drawing_styles.get_default_hand_connections_style()
+                        )
+
                 cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 24),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
                 cv2.imshow(f"Image playback using: {file_name}", frame)
@@ -757,7 +904,6 @@ def main():
             if within_stop_threshold:
                 state = LOCKED
 
-
         # Comput the speed commands to send
         if state == SEEKING and not too_wild:
             err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
@@ -769,7 +915,6 @@ def main():
                 err_yaw_deg = 0.0
             if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
                 err_pitch_deg = 0.0
-
 
             yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
             pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
@@ -807,10 +952,29 @@ def main():
                            cv2.MARKER_CROSS, 12, 2)
             cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
 
+            if hand_results.multi_hand_landmarks:
+                for hand_landmarks in hand_results.multi_hand_landmarks:
+                    mp_drawing.draw_landmarks(
+                        frame,
+                        hand_landmarks,
+                        mp_hands.HAND_CONNECTIONS,
+                        mp_drawing_styles.get_default_hand_landmarks_style(),
+                        mp_drawing_styles.get_default_hand_connections_style()
+                    )
+
+            if pinch_point is not None and gesture_mode == GESTURE_TRACK_PINCH:
+                cv2.circle(frame, (int(pinch_point[0]), int(pinch_point[1])), 8, (255, 0, 255), -1)
+
             if state == LOCKED:
                 state_txt = "LOCKED"
             else:
                 state_txt = "SEEKING"
+
+            gesture_txt = "MOUTH"
+            if gesture_mode == GESTURE_TRACK_PINCH:
+                gesture_txt = "PINCH_TRACK"
+            elif gesture_mode == GESTURE_HOLD_AFTER_PINCH:
+                gesture_txt = "HOLD_AFTER_PINCH"
 
             cv2.putText(frame, f"state:{state_txt}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
@@ -824,8 +988,9 @@ def main():
 
             cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 96),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
-
-            cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 120),
+            cv2.putText(frame, f"gesture:{gesture_txt}", (10, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+            cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 144),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
             cv2.imshow(f"Image playback using: {file_name}", frame)
@@ -842,6 +1007,7 @@ def main():
     except Exception:
         pass
 
+    hands.close()
     face_track_cam.release()
     cv2.destroyAllWindows()
 
