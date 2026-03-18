@@ -82,7 +82,8 @@ print(" p   : SAVE current profile to JSON")
 print(" o   : LOAD profile from JSON")
 print(" q   : exit the application")
 
-vid.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+vid.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+vid.set(cv2.CAP_PROP_GAIN,0)
 
 while(True):
     if live_feed:
