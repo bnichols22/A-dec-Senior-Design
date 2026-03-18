@@ -17,8 +17,6 @@
 #   SimpleBGC SerialAPI shim:
 #     - bgc_init()
 #     - bgc_control_speeds(roll_dps, pitch_dps, yaw_dps)
-#     - bgc_control_angles(roll_angle, pitch_angle, yaw_angle)
-#     - bgc_get_angles_raw(...)
 #     - bgc_set_motors(on_off)   (0=off, 1=on)
 # ==============================================================
 
@@ -96,9 +94,6 @@ PRINT_TELEMETRY = False
 # Smoothing alpha val and max # of lost frames
 SMOOTH_ALPHA = 0.25
 MAX_LOST_FRAMES = 10
-
-# Small delay after motors are turned back on before reading held angle
-HOLD_CAPTURE_DELAY_SEC = 0.08
 
 # Environment logging stuff
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -219,20 +214,7 @@ def button_pressed_edge(now, gpio_handle, button_pin, button_debounce_sec, last_
     prev_button_level = level
     return pressed_event, last_button_event_time, prev_button_level
 
-def handle_mode_cycle(
-    mode,
-    prev_smoothed,
-    prev_time,
-    consecutive_lost_frames,
-    state,
-    hold_roll_angle,
-    hold_pitch_angle,
-    hold_yaw_angle,
-    TRACKING_ENABLED,
-    COMPLIANCE_MOTORS_OFF,
-    HOLD_MOTORS_ON_NO_TRACK,
-    LOCKED
-):
+def handle_mode_cycle(mode, prev_smoothed, prev_time, consecutive_lost_frames, state, TRACKING_ENABLED, COMPLIANCE_MOTORS_OFF, HOLD_MOTORS_ON_NO_TRACK, LOCKED):
     if mode == TRACKING_ENABLED:
         # Press once -> motors OFF (compliance)
         send_speeds(0.0, 0.0, 0.0)
@@ -243,21 +225,20 @@ def handle_mode_cycle(
         prev_time = None
         consecutive_lost_frames = 0
         state = LOCKED
-        hold_roll_angle = None
-        hold_pitch_angle = None
-        hold_yaw_angle = None
-        return mode, prev_smoothed, prev_time, consecutive_lost_frames, state, hold_roll_angle, hold_pitch_angle, hold_yaw_angle
+        return mode, prev_smoothed, prev_time, consecutive_lost_frames, state
 
     if mode == COMPLIANCE_MOTORS_OFF:
         # Press twice -> motors ON, HOLD (tracking still disabled)
         set_motors(1)
+        send_speeds(0.0, 0.0, 0.0)
+        send_speeds(0.0, 0.0, 0.0)
         mode = HOLD_MOTORS_ON_NO_TRACK
 
         prev_smoothed = None
         prev_time = None
         consecutive_lost_frames = 0
         state = LOCKED
-        return mode, prev_smoothed, prev_time, consecutive_lost_frames, state, hold_roll_angle, hold_pitch_angle, hold_yaw_angle
+        return mode, prev_smoothed, prev_time, consecutive_lost_frames, state
 
     # Press third -> tracking enabled again
     mode = TRACKING_ENABLED
@@ -265,10 +246,7 @@ def handle_mode_cycle(
     prev_time = None
     consecutive_lost_frames = 0
     state = LOCKED
-    hold_roll_angle = None
-    hold_pitch_angle = None
-    hold_yaw_angle = None
-    return mode, prev_smoothed, prev_time, consecutive_lost_frames, state, hold_roll_angle, hold_pitch_angle, hold_yaw_angle
+    return mode, prev_smoothed, prev_time, consecutive_lost_frames, state
 
 # If the histogram was removed, this coudl be deleted
 class TimedHistogram:
@@ -373,6 +351,7 @@ def init_sbgc():
         motor_library = ctypes.CDLL(LIB_PATH)
         print(f"Loaded SBGC library from {LIB_PATH}")
     except OSError as e:
+        # Return w/ Error code if we cannot open the .so
         print(f"init_sbgc: error loading {LIB_PATH}: {e}")
         motor_library = None
         motor_library_initialized = False
@@ -384,22 +363,7 @@ def init_sbgc():
     motor_library.bgc_control_speeds.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
     motor_library.bgc_control_speeds.restype = ctypes.c_int
 
-    if hasattr(motor_library, "bgc_control_angles"):
-        motor_library.bgc_control_angles.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
-        motor_library.bgc_control_angles.restype = ctypes.c_int
-    else:
-        print("init_sbgc: WARNING libsimplebgc.so missing bgc_control_angles(). Hold mode will not work.")
-
-    if hasattr(motor_library, "bgc_get_angles_raw"):
-        motor_library.bgc_get_angles_raw.argtypes = [
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.POINTER(ctypes.c_float),
-        ]
-        motor_library.bgc_get_angles_raw.restype = ctypes.c_int
-    else:
-        print("init_sbgc: WARNING libsimplebgc.so missing bgc_get_angles_raw(). Hold mode will not work.")
-
+    # NEW: needed for compliance mode
     if hasattr(motor_library, "bgc_set_motors"):
         motor_library.bgc_set_motors.argtypes = [ctypes.c_int]
         motor_library.bgc_set_motors.restype = ctypes.c_int
@@ -420,60 +384,17 @@ def send_speeds(roll_dps, pitch_dps, yaw_dps):
         print("send_speeds: cannot send because lib is not initialied or setup")
         return False
 
+    # send the speeds to the motors
     status_code = motor_library.bgc_control_speeds(
         ctypes.c_float(roll_dps),
         ctypes.c_float(pitch_dps),
         ctypes.c_float(yaw_dps),
     )
     if status_code != 0:
-        print(f"send_speeds: bgc_control_speeds() returned {status_code}")
+        print(f"send_speeds: bgc_control_speeds: bgc_control_speeds() returned {status_code}, non-zero status fail")
         return False
 
     return True
-
-def send_angles_raw(roll_angle, pitch_angle, yaw_angle):
-    if motor_library is None or not motor_library_initialized:
-        print("send_angles_raw: cannot send because lib is not initialized or setup")
-        return False
-
-    if not hasattr(motor_library, "bgc_control_angles"):
-        print("send_angles_raw: bgc_control_angles() missing from libsimplebgc.so")
-        return False
-
-    status_code = motor_library.bgc_control_angles(
-        ctypes.c_float(roll_angle),
-        ctypes.c_float(pitch_angle),
-        ctypes.c_float(yaw_angle),
-    )
-    if status_code != 0:
-        print(f"send_angles_raw: bgc_control_angles() returned {status_code}")
-        return False
-
-    return True
-
-def get_angles_raw():
-    if motor_library is None or not motor_library_initialized:
-        print("get_angles_raw: cannot read because lib is not initialized or setup")
-        return None
-
-    if not hasattr(motor_library, "bgc_get_angles_raw"):
-        print("get_angles_raw: bgc_get_angles_raw() missing from libsimplebgc.so")
-        return None
-
-    roll = ctypes.c_float()
-    pitch = ctypes.c_float()
-    yaw = ctypes.c_float()
-
-    status_code = motor_library.bgc_get_angles_raw(
-        ctypes.byref(roll),
-        ctypes.byref(pitch),
-        ctypes.byref(yaw),
-    )
-    if status_code != 0:
-        print(f"get_angles_raw: bgc_get_angles_raw() returned {status_code}")
-        return None
-
-    return roll.value, pitch.value, yaw.value
 
 def set_motors(on_off: int):
     """
@@ -503,16 +424,20 @@ def main():
     init_sbgc()
 
     mp_face_mesh = mp.solutions.face_mesh
+    # Can adjust confidence as and detection as needed
     face_mesh = mp_face_mesh.FaceMesh(
         static_image_mode=False, max_num_faces=1, refine_landmarks=True,
         min_detection_confidence=0.5, min_tracking_confidence=0.5
     )
 
+    # Create capture device object and verify it constructed
     face_track_cam = cv2.VideoCapture(CAM_INDEX)
     if not face_track_cam.isOpened():
         print(f'main: Error Unable to open camera from {CAM_INDEX}')
+        # Exit here because we cannot run without camera
         sys.exit(1)
 
+    # Create ADC object and channels
     i2c = busio.I2C(board.SCL, board.SDA)
     ads = ADS1115(i2c)
     ads.gain = 1
@@ -533,8 +458,10 @@ def main():
         CAMERA_PROFILE_DIR
     )
 
+    # Set the max number of stored frames allowed
     face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
 
+    # Clear test log
     try:
         with open(LOG_PATH, "w") as log_file:
             log_file.write(f"Filename: {file_name}\n")
@@ -552,6 +479,7 @@ def main():
 
     anchor = None
 
+    # State names
     LOCKED, SEEKING = 0, 1
     state = LOCKED
 
@@ -561,24 +489,28 @@ def main():
 
     last_send_time = 0.0
 
+    # smoothed speed outputs
     smooth_yaw_dps = None
     smooth_pitch_dps = None
     smooth_roll_dps = None
 
+    # ==============================================================
+    # NEW: Compliance / lock / tracking state (3-press 'c' cycle)
+    # ==============================================================
     TRACKING_ENABLED = 0
     COMPLIANCE_MOTORS_OFF = 1
     HOLD_MOTORS_ON_NO_TRACK = 2
     mode = TRACKING_ENABLED
 
+    # ==============================================================
+    # NEW: Dynamic stable-box state
+    # ==============================================================
     stable_range = "MID"
     pending_range = None
     pending_count = 0
     stable_scalar = STABLE_SCALAR_DEFAULT
 
-    hold_roll_angle = None
-    hold_pitch_angle = None
-    hold_yaw_angle = None
-
+    # GPIO 6 pushbutton input (internal pull-up)
     BUTTON_PIN = 6
     BUTTON_DEBOUNCE_SEC = 0.20
     last_button_event_time = 0.0
@@ -603,6 +535,7 @@ def main():
 
         frame_read, frame = face_track_cam.read()
         if not frame_read:
+            # Note: log_file is only set if file open succeeded above
             try:
                 log_file.write(f"main: frame grab failed\n")
             except Exception:
@@ -612,6 +545,7 @@ def main():
         current_time = time.time()
         frame_height, frame_width = frame.shape[:2]
 
+        # Update camera profile from ADC light mode every loop
         current_light_mode, light_mode_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
         previous_light_mode = update_camera_profile_from_light_mode(
             face_track_cam,
@@ -623,6 +557,7 @@ def main():
         if anchor is None:
             anchor = (frame_width / 2.0, frame_height / 2.0)
 
+        # Do this only if the function exists for hadning button changes
         if gpio_handle is not None:
             button_event, last_button_event_time, prev_button_level = button_pressed_edge(
                 current_time,
@@ -633,38 +568,27 @@ def main():
                 prev_button_level
             )
             if button_event:
-                old_mode = mode
-                mode, prev_smoothed, prev_time, consecutive_lost_frames, state, hold_roll_angle, hold_pitch_angle, hold_yaw_angle = handle_mode_cycle(
+                mode, prev_smoothed, prev_time, consecutive_lost_frames, state = handle_mode_cycle(
                     mode,
                     prev_smoothed,
                     prev_time,
                     consecutive_lost_frames,
                     state,
-                    hold_roll_angle,
-                    hold_pitch_angle,
-                    hold_yaw_angle,
                     TRACKING_ENABLED,
                     COMPLIANCE_MOTORS_OFF,
                     HOLD_MOTORS_ON_NO_TRACK,
                     LOCKED
                 )
 
-                if old_mode == COMPLIANCE_MOTORS_OFF and mode == HOLD_MOTORS_ON_NO_TRACK:
-                    time.sleep(HOLD_CAPTURE_DELAY_SEC)
-                    hold_angles = get_angles_raw()
-                    if hold_angles is not None:
-                        hold_roll_angle, hold_pitch_angle, hold_yaw_angle = hold_angles
-                        send_angles_raw(hold_roll_angle, hold_pitch_angle, hold_yaw_angle)
-                        last_send_time = time.time()
-
         # Handle compliance/hold modes before doing face tracking
         if mode != TRACKING_ENABLED:
+            # In these modes, we do NOT compute face tracking commands.
+            # We either have motors OFF (compliance) or motors ON holding (0 speed).
             if (current_time - last_send_time) >= COMMAND_PERIOD:
+                # HOLD mode wants a steady 0-speed stream.
+                # Compliance mode does not need commands, but this keeps timing consistent.
                 if mode == HOLD_MOTORS_ON_NO_TRACK:
-                    if hold_roll_angle is not None and hold_pitch_angle is not None and hold_yaw_angle is not None:
-                        send_angles_raw(hold_roll_angle, hold_pitch_angle, hold_yaw_angle)
-                    else:
-                        send_speeds(0.0, 0.0, 0.0)
+                    send_speeds(0.0, 0.0, 0.0)
                 last_send_time = current_time
 
             if DRAW_FRAME_RT:
@@ -679,27 +603,33 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
                 cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 56),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
-
-                if hold_roll_angle is not None:
-                    cv2.putText(frame, f"hold=({hold_roll_angle:.1f},{hold_pitch_angle:.1f},{hold_yaw_angle:.1f})", (10, 84),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
-
                 cv2.imshow(f"Image playback using: {file_name}", frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
+            else:
+                # No UI window: cannot read 'c' reliably, so just keep holding.
+                pass
 
+            # Skip to next frame
             continue
 
+        # Normal tracking mode
+        # get the capture from camera
         rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # process the image and set landmarks
         processed_image = face_mesh.process(rgb_frame_cap)
 
         centroid = None
         eye_dist_px = None
 
+        # Get the points from the face mesh and average to get centroid tuple
         if processed_image.multi_face_landmarks:
+            # Only 1 face tracked, assumed to be patient face at index 0
             patient_face = processed_image.multi_face_landmarks[0]
+
+            # known point ids: center upper lip, lower center lip, left mouth corner, right mouth corner
             mouth_idxs = [13, 14, 61, 291]
 
             mouth_points = []
@@ -711,16 +641,21 @@ def main():
             if mouth_points:
                 centroid_x = sum(p[0] for p in mouth_points) / len(mouth_points)
                 centroid_y = sum(p[1] for p in mouth_points) / len(mouth_points)
+                # Make tuple of averaged x and y vals to get mouth center centroid
                 centroid = (centroid_x, centroid_y)
 
+            # Get distance proximity for dynamic stable-box sizing
             eye_dist_px = estimate_eye_dist_px(patient_face, frame_width, frame_height)
 
+        # Handle if no centroid was found
         if centroid is None:
             consecutive_lost_frames += 1
+            # if we lose tracking hold
             if (current_time - last_send_time) >= COMMAND_PERIOD:
                 send_speeds(0.0, 0.0, 0.0)
                 last_send_time = current_time
 
+            # Check how many consecutive_lost_frames frames we have
             if consecutive_lost_frames > MAX_LOST_FRAMES:
                 prev_smoothed = None
                 prev_time = None
@@ -732,26 +667,34 @@ def main():
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:
                     break
+            # Go back to top of while loop
             continue
 
+        # Reset consecutive_lost_frames and smoothed if we got face points
         consecutive_lost_frames = 0
         smoothed = ema_point(centroid, prev_smoothed, SMOOTH_ALPHA)
 
         if prev_time is None:
             prev_time = current_time
+        # ensure the change in time is non-zero
         delta_time = max(1e-6, current_time - prev_time)
 
+        # Find the angular change between frames and convert to speed in deg/s
         if prev_smoothed is None:
             speed = 0.0
         else:
             pixal_displacement_x = smoothed[0] - prev_smoothed[0]
             pixal_displacement_y = smoothed[1] - prev_smoothed[1]
+            # Get displacement in x and y in degrees
             dvx, dvy = pixels_to_deg(pixal_displacement_x, pixal_displacement_y, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
+            # Convert the displacement into speed
             speed = math.hypot(dvx, dvy) / delta_time
 
+        # Set timing and smoothed the previous values for next loop
         prev_time = current_time
         prev_smoothed = smoothed
 
+        # Update stable box scalar using discrete ranges + debounce
         desired_range = range_from_eye_dist(eye_dist_px)
         if desired_range != stable_range:
             if pending_range != desired_range:
@@ -770,17 +713,26 @@ def main():
             pending_count = 0
             stable_scalar = scalar_for_range(stable_range)
 
+        # Build our stable box (dynamic scalar)
         stable_box = build_stable_box(anchor, frame_width, frame_height, stable_scalar)
+        # Determine if we are in the stable region
         in_stable_region = inside_box(smoothed, stable_box)
 
+        # Offset of centroid from center of frame
         dx_center = smoothed[0] - anchor[0]
         dy_center = smoothed[1] - anchor[1]
 
+        # Normalizes the offset error
         norm_dx = dx_center / (frame_width / 2.0)
         norm_dy = dy_center / (frame_height / 2.0)
+        # Find radial distance from center
         radial_norm = math.hypot(norm_dx, norm_dy)
+        # Check if we are close enough to stop
         within_stop_threshold = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
 
+        ### Compute Jitter using timed histogram to set too_wild var (may be able to be removed) ###
+
+        # Add values to the histogram
         pos_x.add(current_time, smoothed[0])
         pos_y.add(current_time, smoothed[1])
         vel_h.add(current_time, speed)
@@ -792,8 +744,12 @@ def main():
         speeds = vel_h.values()
         vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
 
+        # If this is 1, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
         too_wild = (vel_med > VEL_THRESH_DEG_S * 100.0) or (pos_std > POS_STD_THRESH_PX * 100.0)
 
+        ###                                                                                      ###
+
+        # Set States
         if state == LOCKED:
             if not in_stable_region:
                 state = SEEKING
@@ -801,25 +757,33 @@ def main():
             if within_stop_threshold:
                 state = LOCKED
 
+
+        # Comput the speed commands to send
         if state == SEEKING and not too_wild:
             err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
             err_yaw_deg *= AXIS_SIGN["yaw"]
             err_pitch_deg *= AXIS_SIGN["pitch"]
 
+            # Deadband
             if abs(err_yaw_deg) < DEADBAND_DEG_YAW:
                 err_yaw_deg = 0.0
             if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
                 err_pitch_deg = 0.0
 
+
             yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
             pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
-            roll_dps = 0.0
+            roll_dps = 0.0  # keep roll off unless you want it
+
         else:
+            # LOCKED or too_wild so hold and do nothing
             yaw_dps = 0.0
             pitch_dps = 0.0
             roll_dps = 0.0
 
+        # smooth and send the speeds to the controller
         sent = 0
+        # Check if enough time has passed since last send
         if (current_time - last_send_time) >= COMMAND_PERIOD:
             smooth_yaw_dps = ema_scalar(yaw_dps, smooth_yaw_dps, CMD_SPEED_EMA_ALPHA)
             smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, CMD_SPEED_EMA_ALPHA)
@@ -830,10 +794,12 @@ def main():
                 last_send_time = current_time
                 sent = 1
 
+        # Only print telemetry if desired
         if PRINT_TELEMETRY:
             eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
             print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
 
+        # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
         if DRAW_FRAME_RT:
             l, t_, r, b = map(int, stable_box)
             cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
@@ -841,13 +807,17 @@ def main():
                            cv2.MARKER_CROSS, 12, 2)
             cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
 
-            state_txt = "LOCKED" if state == LOCKED else "SEEKING"
+            if state == LOCKED:
+                state_txt = "LOCKED"
+            else:
+                state_txt = "SEEKING"
 
             cv2.putText(frame, f"state:{state_txt}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
             cv2.putText(frame, f"Radial distance = {radial_norm:.3f}", (10, 48),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
 
+            # NEW: show dynamic stable-box info
             eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
             cv2.putText(frame, f"eye_px={eye_str} box={stable_scalar:.3f} {stable_range}", (10, 72),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
@@ -863,8 +833,11 @@ def main():
             if key == 27:
                 break
 
+    # stop motion on exit
     try:
+        # Send a hold command to the motors
         send_speeds(0.0, 0.0, 0.0)
+        # Stop motors on end of program
         set_motors(0)
     except Exception:
         pass
