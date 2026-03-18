@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================
-# File: speed_control_track_button_pinch_gesture.py
+# File: speed_control_compliance_dynbox.py
 # Purpose:
 #   Smooth face tracker that drives gimbal using SPEED mode (deg/s).
 #
@@ -31,7 +31,7 @@ import busio
 from adafruit_ads1x15 import ADS1115, AnalogIn, ads1x15
 
 # --------- Paths and Filename ----------
-file_name = "speed_control_track_button_pinch_gesture.py"
+file_name = "speed_control_compliance_dynbox.py"
 BASE_DIR = os.path.expanduser('~/senior_design/A-dec-Senior-Design/camera/testing')
 os.makedirs(BASE_DIR, exist_ok=True)
 
