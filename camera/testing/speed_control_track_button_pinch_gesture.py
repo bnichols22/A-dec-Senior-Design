@@ -148,6 +148,7 @@ PINCH_ENTER_FRAMES = 3
 THUMBS_UP_ENTER_FRAMES = 3
 PINCH_DISTANCE_RATIO = 0.45
 
+
 # ---------------- Helper Functions ----------------
 
 def ema_point(current_smooth, previous_smooth, alpha):
@@ -235,7 +236,7 @@ def handle_mode_cycle(mode, prev_smoothed, prev_time, consecutive_lost_frames, s
         return mode, prev_smoothed, prev_time, consecutive_lost_frames, state
 
     if mode == COMPLIANCE_MOTORS_OFF:
-        # Press twice -> motors ON, HOLD (tracking still disabled)
+        # Press twice -> motors ON, HOLD (0 speed) but TRACKING DISABLED
         set_motors(1)
         send_speeds(0.0, 0.0, 0.0)
         send_speeds(0.0, 0.0, 0.0)
@@ -255,6 +256,7 @@ def handle_mode_cycle(mode, prev_smoothed, prev_time, consecutive_lost_frames, s
     state = LOCKED
     return mode, prev_smoothed, prev_time, consecutive_lost_frames, state
 
+# If the histogram was removed, this coudl be deleted
 class TimedHistogram:
 
     def __init__(self, win_sec):
@@ -348,12 +350,13 @@ def landmark_to_pixel(landmark, frame_width, frame_height):
 
 def detect_hand_gestures(hand_results, frame_width, frame_height):
     pinch_detected = False
-    pinch_point = None
+    pinch_start_point = None
+    index_tip_point = None
     thumbs_up_detected = False
     best_pinch_ratio = 999.0
 
     if not hand_results.multi_hand_landmarks:
-        return pinch_detected, pinch_point, thumbs_up_detected
+        return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected
 
     for hand_landmarks in hand_results.multi_hand_landmarks:
         lm = hand_landmarks.landmark
@@ -361,13 +364,17 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         thumb_tip = landmark_to_pixel(lm[4], frame_width, frame_height)
         thumb_ip = landmark_to_pixel(lm[3], frame_width, frame_height)
         thumb_mcp = landmark_to_pixel(lm[2], frame_width, frame_height)
+
         index_tip = landmark_to_pixel(lm[8], frame_width, frame_height)
         index_pip = landmark_to_pixel(lm[6], frame_width, frame_height)
         index_mcp = landmark_to_pixel(lm[5], frame_width, frame_height)
+
         middle_tip = landmark_to_pixel(lm[12], frame_width, frame_height)
         middle_pip = landmark_to_pixel(lm[10], frame_width, frame_height)
+
         ring_tip = landmark_to_pixel(lm[16], frame_width, frame_height)
         ring_pip = landmark_to_pixel(lm[14], frame_width, frame_height)
+
         pinky_tip = landmark_to_pixel(lm[20], frame_width, frame_height)
         pinky_pip = landmark_to_pixel(lm[18], frame_width, frame_height)
         pinky_mcp = landmark_to_pixel(lm[17], frame_width, frame_height)
@@ -379,7 +386,8 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if pinch_ratio < PINCH_DISTANCE_RATIO and pinch_ratio < best_pinch_ratio:
             best_pinch_ratio = pinch_ratio
             pinch_detected = True
-            pinch_point = ((thumb_tip[0] + index_tip[0]) / 2.0, (thumb_tip[1] + index_tip[1]) / 2.0)
+            pinch_start_point = ((thumb_tip[0] + index_tip[0]) / 2.0, (thumb_tip[1] + index_tip[1]) / 2.0)
+            index_tip_point = index_tip
 
         thumb_up = (
             thumb_tip[1] < thumb_ip[1] < thumb_mcp[1] and
@@ -391,7 +399,7 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if thumb_up:
             thumbs_up_detected = True
 
-    return pinch_detected, pinch_point, thumbs_up_detected
+    return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected
 
 
 # ----------------------------------------------------------------------
@@ -440,6 +448,7 @@ def send_speeds(roll_dps, pitch_dps, yaw_dps):
         print("send_speeds: cannot send because lib is not initialied or setup")
         return False
 
+    # send the speeds to the motors
     status_code = motor_library.bgc_control_speeds(
         ctypes.c_float(roll_dps),
         ctypes.c_float(pitch_dps),
@@ -613,6 +622,7 @@ def main():
                 pass
             break
 
+        frame = cv2.flip(frame, 1)
         current_time = time.time()
         frame_height, frame_width = frame.shape[:2]
 
@@ -693,24 +703,24 @@ def main():
         processed_image = face_mesh.process(rgb_frame_cap)
         hand_results = hands.process(rgb_frame_cap)
 
-        pinch_detected, pinch_point_candidate, thumbs_up_detected = detect_hand_gestures(
+        pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected = detect_hand_gestures(
             hand_results,
             frame_width,
             frame_height
         )
 
         if gesture_mode == GESTURE_TRACK_MOUTH:
-            if pinch_detected and pinch_point_candidate is not None:
+            if pinch_detected and pinch_start_point is not None:
                 pinch_counter += 1
                 if pinch_counter >= PINCH_ENTER_FRAMES:
                     gesture_mode = GESTURE_TRACK_PINCH
-                    pinch_point = pinch_point_candidate
+                    pinch_point = index_tip_point
             else:
                 pinch_counter = 0
 
         elif gesture_mode == GESTURE_TRACK_PINCH:
-            if pinch_detected and pinch_point_candidate is not None:
-                pinch_point = pinch_point_candidate
+            if pinch_detected and index_tip_point is not None:
+                pinch_point = index_tip_point
             else:
                 gesture_mode = GESTURE_HOLD_AFTER_PINCH
                 pinch_counter = 0
@@ -904,6 +914,7 @@ def main():
             if within_stop_threshold:
                 state = LOCKED
 
+
         # Comput the speed commands to send
         if state == SEEKING and not too_wild:
             err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
@@ -915,6 +926,7 @@ def main():
                 err_yaw_deg = 0.0
             if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
                 err_pitch_deg = 0.0
+
 
             yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
             pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
@@ -988,8 +1000,10 @@ def main():
 
             cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 96),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+
             cv2.putText(frame, f"gesture:{gesture_txt}", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+
             cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 144),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
@@ -1008,6 +1022,7 @@ def main():
         pass
 
     hands.close()
+    face_mesh.close()
     face_track_cam.release()
     cv2.destroyAllWindows()
 
