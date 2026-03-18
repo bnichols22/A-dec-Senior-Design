@@ -63,7 +63,7 @@ int bgc_set_motors(int on)
     return (int)st;
 }
 
-// Existing absolute-angle control (left unchanged because this is what works for you).
+// LEFT UNCHANGED because this is the version you said works.
 int bgc_control_angles(float roll_deg, float pitch_deg, float yaw_deg)
 {
     gCtrl.mode[ROLL]  = CtrlMODE_ANGLE | CtrlFLAG_TARGET_PRECISE;
@@ -90,8 +90,9 @@ int bgc_control_speeds(float roll_dps, float pitch_dps, float yaw_dps)
     return (int)SBGC32_Control(&gSBGC, &gCtrl);
 }
 
-// Read current IMU angles in DEGREES.
-int bgc_get_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
+// ---------- DEGREE READBACK ----------
+
+int bgc_get_angles_deg(float *roll_deg, float *pitch_deg, float *yaw_deg)
 {
     sbgcCommandStatus_t st;
 
@@ -111,8 +112,7 @@ int bgc_get_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
     return 0;
 }
 
-// Read target angles in DEGREES.
-int bgc_get_target_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
+int bgc_get_target_angles_deg(float *roll_deg, float *pitch_deg, float *yaw_deg)
 {
     sbgcCommandStatus_t st;
 
@@ -132,26 +132,73 @@ int bgc_get_target_angles(float *roll_deg, float *pitch_deg, float *yaw_deg)
     return 0;
 }
 
-// Alias/helper: explicitly named to emphasize these are degrees.
-int bgc_get_angles_deg(float *roll_deg, float *pitch_deg, float *yaw_deg)
+// ---------- RAW ANGLE-UNIT READBACK ----------
+// These return the controller's internal angle units directly.
+
+int bgc_get_angles_raw(float *roll_angle_units, float *pitch_angle_units, float *yaw_angle_units)
 {
-    return bgc_get_angles(roll_deg, pitch_deg, yaw_deg);
+    sbgcCommandStatus_t st;
+
+    if (!roll_angle_units || !pitch_angle_units || !yaw_angle_units)
+        return -1;
+
+    memset(&gAngles, 0, sizeof(gAngles));
+
+    st = SBGC32_GetAngles(&gSBGC, &gAngles);
+    if (st != sbgcCOMMAND_OK)
+        return (int)st;
+
+    *roll_angle_units  = (float)gAngles.AxisGA[ROLL].IMU_Angle;
+    *pitch_angle_units = (float)gAngles.AxisGA[PITCH].IMU_Angle;
+    *yaw_angle_units   = (float)gAngles.AxisGA[YAW].IMU_Angle;
+
+    return 0;
 }
 
-// Read current angles in degrees and write them into user-provided storage.
-int bgc_capture_current_angles_deg(float *roll_deg, float *pitch_deg, float *yaw_deg)
+int bgc_get_target_angles_raw(float *roll_angle_units, float *pitch_angle_units, float *yaw_angle_units)
 {
-    return bgc_get_angles(roll_deg, pitch_deg, yaw_deg);
+    sbgcCommandStatus_t st;
+
+    if (!roll_angle_units || !pitch_angle_units || !yaw_angle_units)
+        return -1;
+
+    memset(&gAngles, 0, sizeof(gAngles));
+
+    st = SBGC32_GetAngles(&gSBGC, &gAngles);
+    if (st != sbgcCOMMAND_OK)
+        return (int)st;
+
+    *roll_angle_units  = (float)gAngles.AxisGA[ROLL].targetAngle;
+    *pitch_angle_units = (float)gAngles.AxisGA[PITCH].targetAngle;
+    *yaw_angle_units   = (float)gAngles.AxisGA[YAW].targetAngle;
+
+    return 0;
 }
 
-// Read current angles in degrees and immediately re-command those same angles
-// using the existing working bgc_control_angles().
-int bgc_hold_current_position(void)
+// ---------- HOLD HELPERS ----------
+
+// Hold based on raw controller angle units.
+// This is the safest match for your current working bgc_control_angles().
+int bgc_hold_current_position_raw(void)
+{
+    float roll_raw, pitch_raw, yaw_raw;
+    int rc;
+
+    rc = bgc_get_angles_raw(&roll_raw, &pitch_raw, &yaw_raw);
+    if (rc != 0)
+        return rc;
+
+    rc = bgc_control_angles(roll_raw, pitch_raw, yaw_raw);
+    return rc;
+}
+
+// Optional: hold based on degrees, if you want to experiment later.
+int bgc_hold_current_position_deg(void)
 {
     float roll_deg, pitch_deg, yaw_deg;
     int rc;
 
-    rc = bgc_get_angles(&roll_deg, &pitch_deg, &yaw_deg);
+    rc = bgc_get_angles_deg(&roll_deg, &pitch_deg, &yaw_deg);
     if (rc != 0)
         return rc;
 
