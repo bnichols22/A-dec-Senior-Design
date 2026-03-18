@@ -144,9 +144,11 @@ GESTURE_TRACK_MOUTH = 0
 GESTURE_TRACK_PINCH = 1
 GESTURE_HOLD_AFTER_PINCH = 2
 
-PINCH_ENTER_FRAMES = 3
-THUMBS_UP_ENTER_FRAMES = 3
-PINCH_DISTANCE_RATIO = 0.45
+HAND_DETECTION_CONFIDENCE = 0.75
+HAND_TRACKING_CONFIDENCE = 0.75
+PINCH_ENTER_FRAMES = 5
+THUMBS_UP_ENTER_FRAMES = 5
+PINCH_DISTANCE_RATIO = 0.28
 
 
 # ---------------- Helper Functions ----------------
@@ -383,7 +385,13 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         pinch_distance = math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1])
         pinch_ratio = pinch_distance / palm_width
 
-        if pinch_ratio < PINCH_DISTANCE_RATIO and pinch_ratio < best_pinch_ratio:
+        non_index_closed = (
+            middle_tip[1] > middle_pip[1] and
+            ring_tip[1] > ring_pip[1] and
+            pinky_tip[1] > pinky_pip[1]
+        )
+
+        if pinch_ratio < PINCH_DISTANCE_RATIO and non_index_closed and pinch_ratio < best_pinch_ratio:
             best_pinch_ratio = pinch_ratio
             pinch_detected = True
             pinch_start_point = ((thumb_tip[0] + index_tip[0]) / 2.0, (thumb_tip[1] + index_tip[1]) / 2.0)
@@ -499,10 +507,10 @@ def main():
     )
 
     hands = mp_hands.Hands(
-        model_complexity=0,
+        model_complexity=1,
         max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
+        min_detection_confidence=HAND_DETECTION_CONFIDENCE,
+        min_tracking_confidence=HAND_TRACKING_CONFIDENCE
     )
 
     # Create capture device object and verify it constructed
@@ -777,7 +785,7 @@ def main():
                         mp_drawing.draw_landmarks(
                             frame,
                             hand_landmarks,
-                            mp_hands.HAND_CONNECTIONS,
+                            mp.solutions.hands.HAND_CONNECTIONS,
                             mp_drawing_styles.get_default_hand_landmarks_style(),
                             mp_drawing_styles.get_default_hand_connections_style()
                         )
@@ -813,7 +821,7 @@ def main():
                         mp_drawing.draw_landmarks(
                             frame,
                             hand_landmarks,
-                            mp_hands.HAND_CONNECTIONS,
+                            mp.solutions.hands.HAND_CONNECTIONS,
                             mp_drawing_styles.get_default_hand_landmarks_style(),
                             mp_drawing_styles.get_default_hand_connections_style()
                         )
@@ -914,7 +922,6 @@ def main():
             if within_stop_threshold:
                 state = LOCKED
 
-
         # Comput the speed commands to send
         if state == SEEKING and not too_wild:
             err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
@@ -926,7 +933,6 @@ def main():
                 err_yaw_deg = 0.0
             if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
                 err_pitch_deg = 0.0
-
 
             yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
             pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
@@ -969,7 +975,7 @@ def main():
                     mp_drawing.draw_landmarks(
                         frame,
                         hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
+                        mp.solutions.hands.HAND_CONNECTIONS,
                         mp_drawing_styles.get_default_hand_landmarks_style(),
                         mp_drawing_styles.get_default_hand_connections_style()
                     )
