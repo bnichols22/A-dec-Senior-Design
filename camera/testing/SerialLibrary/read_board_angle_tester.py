@@ -10,6 +10,8 @@ LIB_PATH = os.path.expanduser(
 
 motor_library = ctypes.CDLL(LIB_PATH)
 
+# ----------- Function bindings -----------
+
 motor_library.bgc_init.argtypes = []
 motor_library.bgc_init.restype = ctypes.c_int
 
@@ -21,65 +23,70 @@ motor_library.bgc_control_angles.argtypes = [
 ]
 motor_library.bgc_control_angles.restype = ctypes.c_int
 
-motor_library.bgc_get_angles.argtypes = [
+# RAW angle readers (NEW)
+motor_library.bgc_get_angles_raw.argtypes = [
     ctypes.POINTER(ctypes.c_float),
     ctypes.POINTER(ctypes.c_float),
     ctypes.POINTER(ctypes.c_float),
 ]
-motor_library.bgc_get_angles.restype = ctypes.c_int
+motor_library.bgc_get_angles_raw.restype = ctypes.c_int
 
-motor_library.bgc_get_target_angles.argtypes = [
+motor_library.bgc_get_target_angles_raw.argtypes = [
     ctypes.POINTER(ctypes.c_float),
     ctypes.POINTER(ctypes.c_float),
     ctypes.POINTER(ctypes.c_float),
 ]
-motor_library.bgc_get_target_angles.restype = ctypes.c_int
+motor_library.bgc_get_target_angles_raw.restype = ctypes.c_int
 
 motor_library.bgc_deinit.argtypes = []
 motor_library.bgc_deinit.restype = None
 
 
-def get_angles():
+# ----------- Helpers -----------
+
+def get_angles_raw():
     roll = ctypes.c_float()
     pitch = ctypes.c_float()
     yaw = ctypes.c_float()
 
-    rc = motor_library.bgc_get_angles(
+    rc = motor_library.bgc_get_angles_raw(
         ctypes.byref(roll),
         ctypes.byref(pitch),
         ctypes.byref(yaw),
     )
     if rc != 0:
-        raise RuntimeError(f"bgc_get_angles failed with rc={rc}")
+        raise RuntimeError(f"bgc_get_angles_raw failed with rc={rc}")
 
     return roll.value, pitch.value, yaw.value
 
 
-def get_target_angles():
+def get_target_angles_raw():
     roll = ctypes.c_float()
     pitch = ctypes.c_float()
     yaw = ctypes.c_float()
 
-    rc = motor_library.bgc_get_target_angles(
+    rc = motor_library.bgc_get_target_angles_raw(
         ctypes.byref(roll),
         ctypes.byref(pitch),
         ctypes.byref(yaw),
     )
     if rc != 0:
-        raise RuntimeError(f"bgc_get_target_angles failed with rc={rc}")
+        raise RuntimeError(f"bgc_get_target_angles_raw failed with rc={rc}")
 
     return roll.value, pitch.value, yaw.value
 
 
-def command_angles(roll_deg, pitch_deg, yaw_deg):
+def command_angles(roll, pitch, yaw):
     rc = motor_library.bgc_control_angles(
-        ctypes.c_float(roll_deg),
-        ctypes.c_float(pitch_deg),
-        ctypes.c_float(yaw_deg),
+        ctypes.c_float(roll),
+        ctypes.c_float(pitch),
+        ctypes.c_float(yaw),
     )
     if rc != 0:
         raise RuntimeError(f"bgc_control_angles failed with rc={rc}")
 
+
+# ----------- Main -----------
 
 def main():
     rc = motor_library.bgc_init()
@@ -101,17 +108,16 @@ def main():
 
             command_angles(cmd_r, cmd_p, cmd_y)
 
-            # Give the controller some time to react
-            time.sleep(8)
+            time.sleep(2)
 
-            
-            tgt_r, tgt_p, tgt_y = get_target_angles()
-            cur_r, cur_p, cur_y = get_angles()
+            tgt_r, tgt_p, tgt_y = get_target_angles_raw()
+            cur_r, cur_p, cur_y = get_angles_raw()
 
             print(
-                f"CMD    = ({cmd_r:+7.2f}, {cmd_p:+7.2f}, {cmd_y:+7.2f})\n"
-                f"TARGET = ({tgt_r:+7.2f}, {tgt_p:+7.2f}, {tgt_y:+7.2f})\n"
-                f"READ   = ({cur_r:+7.2f}, {cur_p:+7.2f}, {cur_y:+7.2f})\n"
+                f"TEST {idx}\n"
+                f"CMD (input) = ({cmd_r:+7.2f}, {cmd_p:+7.2f}, {cmd_y:+7.2f})\n"
+                f"TARGET RAW  = ({tgt_r:+10.2f}, {tgt_p:+10.2f}, {tgt_y:+10.2f})\n"
+                f"READ RAW    = ({cur_r:+10.2f}, {cur_p:+10.2f}, {cur_y:+10.2f})\n"
             )
 
     finally:
