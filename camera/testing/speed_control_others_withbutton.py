@@ -809,6 +809,9 @@ def main():
             eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
             print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
 
+
+        # --- WRITE FRAME TO FILE ---
+        out.write(frame)
         # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
         if DRAW_FRAME_RT:
             l, t_, r, b = map(int, stable_box)
@@ -839,9 +842,6 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
             cv2.imshow(f"Image playback using: {file_name}", frame)
-
-            # --- WRITE FRAME TO FILE ---
-            out.write(frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
