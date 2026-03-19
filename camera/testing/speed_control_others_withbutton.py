@@ -23,6 +23,7 @@
 import os, sys, time, math, warnings, statistics, ctypes
 import cv2
 import mediapipe as mp
+import numpy as np
 from collections import deque
 import lgpio
 import json
@@ -437,6 +438,15 @@ def main():
         # Exit here because we cannot run without camera
         sys.exit(1)
 
+    # --- RECORDING SETUP START ---
+    frame_width = int(face_track_cam.get(3))
+    frame_height = int(face_track_cam.get(4))
+
+    # Using XVID / .avi for Raspberry Pi compatibility
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    # Save to current directory
+    out = cv2.VideoWriter('face_track_demo.avi', fourcc, 20.0, (frame_width, frame_height))
+
     # Create ADC object and channels
     i2c = busio.I2C(board.SCL, board.SDA)
     ads = ADS1115(i2c)
@@ -829,6 +839,10 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
             cv2.imshow(f"Image playback using: {file_name}", frame)
+
+            # --- WRITE FRAME TO FILE ---
+            out.write(frame)
+
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 break
@@ -843,6 +857,7 @@ def main():
         pass
 
     face_track_cam.release()
+    out.release()
     cv2.destroyAllWindows()
 
     if gpio_handle is not None:
