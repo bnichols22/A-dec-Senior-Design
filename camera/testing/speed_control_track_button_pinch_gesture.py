@@ -356,9 +356,11 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
     index_tip_point = None
     thumbs_up_detected = False
     best_pinch_ratio = 999.0
+    fist_detected = False
+    fallback_index_tip_point = None
 
     if not hand_results.multi_hand_landmarks:
-        return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected
+        return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected, fist_detected
 
     for hand_landmarks in hand_results.multi_hand_landmarks:
         lm = hand_landmarks.landmark
@@ -380,6 +382,9 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         pinky_tip = landmark_to_pixel(lm[20], frame_width, frame_height)
         pinky_pip = landmark_to_pixel(lm[18], frame_width, frame_height)
         pinky_mcp = landmark_to_pixel(lm[17], frame_width, frame_height)
+
+        if fallback_index_tip_point is None:
+            fallback_index_tip_point = index_tip
 
         palm_width = max(1.0, math.hypot(index_mcp[0] - pinky_mcp[0], index_mcp[1] - pinky_mcp[1]))
         pinch_distance = math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1])
@@ -407,7 +412,19 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if thumb_up:
             thumbs_up_detected = True
 
-    return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected
+        hand_fist = (
+            index_tip[1] > index_pip[1] and
+            middle_tip[1] > middle_pip[1] and
+            ring_tip[1] > ring_pip[1] and
+            pinky_tip[1] > pinky_pip[1]
+        )
+        if hand_fist:
+            fist_detected = True
+
+    if index_tip_point is None:
+        index_tip_point = fallback_index_tip_point
+
+    return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected, fist_detected
 
 
 # ----------------------------------------------------------------------
@@ -711,7 +728,7 @@ def main():
         processed_image = face_mesh.process(rgb_frame_cap)
         hand_results = hands.process(rgb_frame_cap)
 
-        pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected = detect_hand_gestures(
+        pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected, fist_detected = detect_hand_gestures(
             hand_results,
             frame_width,
             frame_height
@@ -727,12 +744,13 @@ def main():
                 pinch_counter = 0
 
         elif gesture_mode == GESTURE_TRACK_PINCH:
-            if pinch_detected and index_tip_point is not None:
-                pinch_point = index_tip_point
-            else:
-                gesture_mode = GESTURE_HOLD_AFTER_PINCH
+            if fist_detected:
+                gesture_mode = GESTURE_TRACK_MOUTH
                 pinch_counter = 0
                 thumbs_up_counter = 0
+                pinch_point = None
+            elif index_tip_point is not None:
+                pinch_point = index_tip_point
 
         elif gesture_mode == GESTURE_HOLD_AFTER_PINCH:
             if thumbs_up_detected:
@@ -990,7 +1008,7 @@ def main():
 
             gesture_txt = "MOUTH"
             if gesture_mode == GESTURE_TRACK_PINCH:
-                gesture_txt = "PINCH_TRACK"
+                gesture_txt = "INDEX_TRACK"
             elif gesture_mode == GESTURE_HOLD_AFTER_PINCH:
                 gesture_txt = "HOLD_AFTER_PINCH"
 
@@ -1010,7 +1028,10 @@ def main():
             cv2.putText(frame, f"gesture:{gesture_txt}", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
-            cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 144),
+            cv2.putText(frame, "Pinch to track index tip, fist to resume mouth", (10, 144),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+
+            cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 168),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
             cv2.imshow(f"Image playback using: {file_name}", frame)
