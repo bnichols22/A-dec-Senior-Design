@@ -149,6 +149,7 @@ HAND_TRACKING_CONFIDENCE = 0.75
 PINCH_ENTER_FRAMES = 5
 THUMBS_UP_ENTER_FRAMES = 5
 PINCH_DISTANCE_RATIO = 0.28
+FIST_ENTER_FRAMES = 5
 
 
 # ---------------- Helper Functions ----------------
@@ -357,7 +358,6 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
     thumbs_up_detected = False
     best_pinch_ratio = 999.0
     fist_detected = False
-    fallback_index_tip_point = None
 
     if not hand_results.multi_hand_landmarks:
         return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected, fist_detected
@@ -382,9 +382,6 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         pinky_tip = landmark_to_pixel(lm[20], frame_width, frame_height)
         pinky_pip = landmark_to_pixel(lm[18], frame_width, frame_height)
         pinky_mcp = landmark_to_pixel(lm[17], frame_width, frame_height)
-
-        if fallback_index_tip_point is None:
-            fallback_index_tip_point = index_tip
 
         palm_width = max(1.0, math.hypot(index_mcp[0] - pinky_mcp[0], index_mcp[1] - pinky_mcp[1]))
         pinch_distance = math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1])
@@ -420,9 +417,6 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         )
         if hand_fist:
             fist_detected = True
-
-    if index_tip_point is None:
-        index_tip_point = fallback_index_tip_point
 
     return pinch_detected, pinch_start_point, index_tip_point, thumbs_up_detected, fist_detected
 
@@ -613,6 +607,7 @@ def main():
     gesture_mode = GESTURE_TRACK_MOUTH
     pinch_counter = 0
     thumbs_up_counter = 0
+    fist_counter = 0
     pinch_point = None
 
     # GPIO 6 pushbutton input (internal pull-up)
@@ -735,33 +730,35 @@ def main():
         )
 
         if gesture_mode == GESTURE_TRACK_MOUTH:
-            if pinch_detected and pinch_start_point is not None:
+            if pinch_detected and index_tip_point is not None:
                 pinch_counter += 1
                 if pinch_counter >= PINCH_ENTER_FRAMES:
                     gesture_mode = GESTURE_TRACK_PINCH
                     pinch_point = index_tip_point
+                    prev_smoothed = None
+                    prev_time = None
+                    state = LOCKED
+                    pinch_counter = 0
+                    fist_counter = 0
             else:
                 pinch_counter = 0
 
         elif gesture_mode == GESTURE_TRACK_PINCH:
-            if fist_detected:
-                gesture_mode = GESTURE_TRACK_MOUTH
-                pinch_counter = 0
-                thumbs_up_counter = 0
-                pinch_point = None
-            elif index_tip_point is not None:
+            if index_tip_point is not None:
                 pinch_point = index_tip_point
 
-        elif gesture_mode == GESTURE_HOLD_AFTER_PINCH:
-            if thumbs_up_detected:
-                thumbs_up_counter += 1
-                if thumbs_up_counter >= THUMBS_UP_ENTER_FRAMES:
+            if fist_detected:
+                fist_counter += 1
+                if fist_counter >= FIST_ENTER_FRAMES:
                     gesture_mode = GESTURE_TRACK_MOUTH
-                    thumbs_up_counter = 0
-                    pinch_counter = 0
                     pinch_point = None
+                    prev_smoothed = None
+                    prev_time = None
+                    state = LOCKED
+                    pinch_counter = 0
+                    fist_counter = 0
             else:
-                thumbs_up_counter = 0
+                fist_counter = 0
 
         centroid = None
         eye_dist_px = None
@@ -791,34 +788,6 @@ def main():
 
         if gesture_mode == GESTURE_TRACK_PINCH and pinch_point is not None:
             centroid = pinch_point
-
-        if gesture_mode == GESTURE_HOLD_AFTER_PINCH:
-            if (current_time - last_send_time) >= COMMAND_PERIOD:
-                send_speeds(0.0, 0.0, 0.0)
-                last_send_time = current_time
-
-            if DRAW_FRAME_RT:
-                if hand_results.multi_hand_landmarks:
-                    for hand_landmarks in hand_results.multi_hand_landmarks:
-                        mp_drawing.draw_landmarks(
-                            frame,
-                            hand_landmarks,
-                            mp.solutions.hands.HAND_CONNECTIONS,
-                            mp_drawing_styles.get_default_hand_landmarks_style(),
-                            mp_drawing_styles.get_default_hand_connections_style()
-                        )
-
-                cv2.putText(frame, "gesture:HOLD_AFTER_PINCH", (10, 24),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2, cv2.LINE_AA)
-                cv2.putText(frame, "thumbs up to resume mouth tracking", (10, 48),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2, cv2.LINE_AA)
-                cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 72),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
-                cv2.imshow(f"Image playback using: {file_name}", frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key == 27:
-                    break
-            continue
 
         # Handle if no centroid was found
         if centroid is None:
@@ -1008,9 +977,7 @@ def main():
 
             gesture_txt = "MOUTH"
             if gesture_mode == GESTURE_TRACK_PINCH:
-                gesture_txt = "INDEX_TRACK"
-            elif gesture_mode == GESTURE_HOLD_AFTER_PINCH:
-                gesture_txt = "HOLD_AFTER_PINCH"
+                gesture_txt = "INDEX_TIP"
 
             cv2.putText(frame, f"state:{state_txt}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
@@ -1028,7 +995,7 @@ def main():
             cv2.putText(frame, f"gesture:{gesture_txt}", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
-            cv2.putText(frame, "Pinch to track index tip, fist to resume mouth", (10, 144),
+            cv2.putText(frame, "Pinch -> track fingertip | Fist -> face track", (10, 144),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
 
             cv2.putText(frame, "Press 'c' -> compliance/lock cycle", (10, 168),
