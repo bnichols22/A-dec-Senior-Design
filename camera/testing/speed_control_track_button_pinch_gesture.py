@@ -151,6 +151,15 @@ THUMBS_UP_ENTER_FRAMES = 5
 PINCH_DISTANCE_RATIO = 0.28
 FIST_ENTER_FRAMES = 5
 
+FINGER_SMOOTH_ALPHA = 0.45
+FINGER_CMD_SPEED_EMA_ALPHA = 0.55
+FINGER_STABLE_SCALAR_MULT = 0.60
+FINGER_STOP_SEEKING_THRESHOLD = 0.010
+FINGER_DEADBAND_DEG_YAW = 0.08
+FINGER_DEADBAND_DEG_PITCH = 0.08
+FINGER_KP_YAW_DPS_PER_DEG = 1.65
+FINGER_KP_PITCH_DPS_PER_DEG = 1.65
+
 
 # ---------------- Helper Functions ----------------
 
@@ -383,7 +392,6 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         pinky_pip = landmark_to_pixel(lm[18], frame_width, frame_height)
         pinky_mcp = landmark_to_pixel(lm[17], frame_width, frame_height)
 
-        # Always keep the latest visible fingertip point so tracking continues to update
         index_tip_point = index_tip
 
         palm_width = max(1.0, math.hypot(index_mcp[0] - pinky_mcp[0], index_mcp[1] - pinky_mcp[1]))
@@ -739,7 +747,7 @@ def main():
                     prev_smoothed = None
                     prev_time = None
                     consecutive_lost_frames = 0
-                    state = LOCKED
+                    state = SEEKING
                     pinch_counter = 0
                     fist_counter = 0
             else:
@@ -866,7 +874,8 @@ def main():
 
         # Reset consecutive_lost_frames and smoothed if we got face points
         consecutive_lost_frames = 0
-        smoothed = ema_point(centroid, prev_smoothed, SMOOTH_ALPHA)
+        point_alpha = FINGER_SMOOTH_ALPHA if gesture_mode == GESTURE_TRACK_PINCH else SMOOTH_ALPHA
+        smoothed = ema_point(centroid, prev_smoothed, point_alpha)
 
         if prev_time is None:
             prev_time = current_time
@@ -907,8 +916,15 @@ def main():
             pending_count = 0
             stable_scalar = scalar_for_range(stable_range)
 
+        current_stable_scalar = stable_scalar
+        current_stop_threshold = STABLE_STOP_SEEKING_THRESHOLD
+
+        if gesture_mode == GESTURE_TRACK_PINCH:
+            current_stable_scalar *= FINGER_STABLE_SCALAR_MULT
+            current_stop_threshold = FINGER_STOP_SEEKING_THRESHOLD
+
         # Build our stable box (dynamic scalar)
-        stable_box = build_stable_box(anchor, frame_width, frame_height, stable_scalar)
+        stable_box = build_stable_box(anchor, frame_width, frame_height, current_stable_scalar)
         # Determine if we are in the stable region
         in_stable_region = inside_box(smoothed, stable_box)
 
@@ -922,7 +938,7 @@ def main():
         # Find radial distance from center
         radial_norm = math.hypot(norm_dx, norm_dy)
         # Check if we are close enough to stop
-        within_stop_threshold = (radial_norm <= STABLE_STOP_SEEKING_THRESHOLD)
+        within_stop_threshold = (radial_norm <= current_stop_threshold)
 
         ### Compute Jitter using timed histogram to set too_wild var (may be able to be removed) ###
 
@@ -957,14 +973,20 @@ def main():
             err_yaw_deg *= AXIS_SIGN["yaw"]
             err_pitch_deg *= AXIS_SIGN["pitch"]
 
+            deadband_yaw = FINGER_DEADBAND_DEG_YAW if gesture_mode == GESTURE_TRACK_PINCH else DEADBAND_DEG_YAW
+            deadband_pitch = FINGER_DEADBAND_DEG_PITCH if gesture_mode == GESTURE_TRACK_PINCH else DEADBAND_DEG_PITCH
+
             # Deadband
-            if abs(err_yaw_deg) < DEADBAND_DEG_YAW:
+            if abs(err_yaw_deg) < deadband_yaw:
                 err_yaw_deg = 0.0
-            if abs(err_pitch_deg) < DEADBAND_DEG_PITCH:
+            if abs(err_pitch_deg) < deadband_pitch:
                 err_pitch_deg = 0.0
 
-            yaw_dps = clamp(KP_YAW_DPS_PER_DEG * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
-            pitch_dps = clamp(KP_PITCH_DPS_PER_DEG * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
+            kp_yaw = FINGER_KP_YAW_DPS_PER_DEG if gesture_mode == GESTURE_TRACK_PINCH else KP_YAW_DPS_PER_DEG
+            kp_pitch = FINGER_KP_PITCH_DPS_PER_DEG if gesture_mode == GESTURE_TRACK_PINCH else KP_PITCH_DPS_PER_DEG
+
+            yaw_dps = clamp(kp_yaw * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
+            pitch_dps = clamp(kp_pitch * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
             roll_dps = 0.0  # keep roll off unless you want it
 
         else:
@@ -977,9 +999,11 @@ def main():
         sent = 0
         # Check if enough time has passed since last send
         if (current_time - last_send_time) >= COMMAND_PERIOD:
-            smooth_yaw_dps = ema_scalar(yaw_dps, smooth_yaw_dps, CMD_SPEED_EMA_ALPHA)
-            smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, CMD_SPEED_EMA_ALPHA)
-            smooth_roll_dps = ema_scalar(roll_dps, smooth_roll_dps, CMD_SPEED_EMA_ALPHA)
+            cmd_alpha = FINGER_CMD_SPEED_EMA_ALPHA if gesture_mode == GESTURE_TRACK_PINCH else CMD_SPEED_EMA_ALPHA
+
+            smooth_yaw_dps = ema_scalar(yaw_dps, smooth_yaw_dps, cmd_alpha)
+            smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, cmd_alpha)
+            smooth_roll_dps = ema_scalar(roll_dps, smooth_roll_dps, cmd_alpha)
 
             ok_send = send_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
             if ok_send:
@@ -989,7 +1013,7 @@ def main():
         # Only print telemetry if desired
         if PRINT_TELEMETRY:
             eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
+            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
 
         # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
         if DRAW_FRAME_RT:
@@ -1030,7 +1054,7 @@ def main():
 
             # NEW: show dynamic stable-box info
             eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-            cv2.putText(frame, f"eye_px={eye_str} box={stable_scalar:.3f} {stable_range}", (10, 72),
+            cv2.putText(frame, f"eye_px={eye_str} box={current_stable_scalar:.3f} {stable_range}", (10, 72),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40,220,40), 2, cv2.LINE_AA)
 
             cv2.putText(frame, f"light_mode:{current_light_mode}", (10, 96),
