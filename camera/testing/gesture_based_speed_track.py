@@ -1016,7 +1016,7 @@ def main():
         vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
 
         # If this is 1, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
-        too_wild = (vel_med > VEL_THRESH_DEG_S * 100.0) or (pos_std > POS_STD_THRESH_PX * 100.0)
+        too_wild = (vel_med > VEL_THRESH_DEG_S * 1000.0) or (pos_std > POS_STD_THRESH_PX * 1000.0)
 
         ###                                                                                      ###
 
