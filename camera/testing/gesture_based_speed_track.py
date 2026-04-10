@@ -46,8 +46,8 @@ PATIENT_PHOTO_DIR = os.path.join(BASE_DIR, "patient_photo")
 os.makedirs(PATIENT_PHOTO_DIR, exist_ok=True)
 
 # --------- Vision / tracker config ----------
-WIDE_ANGLE_CAM_INDEX = 0
-CENTER_CAM_INDEX = 1
+WIDE_ANGLE_CAM_INDEX = 2
+CENTER_CAM_INDEX = 0
 FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
