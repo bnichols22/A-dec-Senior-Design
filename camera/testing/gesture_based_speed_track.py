@@ -128,6 +128,11 @@ STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
 # mouth position in the camera image should be lower than image center.
 # We keep this discrete by distance bucket to avoid making the controller
 # continuously re-target itself.
+#
+# Horizontal compensation is a small fixed offset because the camera is only
+# slightly left/right of the true light center compared with the stronger
+# vertical offset from being mounted above it.
+ANCHOR_X_OFFSET_PX = 10.0
 ANCHOR_Y_OFFSET_FAR_PX = 20.0
 ANCHOR_Y_OFFSET_MID_PX = 38.0
 ANCHOR_Y_OFFSET_NEAR_PX = 58.0
@@ -250,7 +255,7 @@ def anchor_y_offset_for_range(rng):
 
 def build_tracking_anchor(frame_width, frame_height, rng):
     return (
-        frame_width / 2.0,
+        (frame_width / 2.0) + ANCHOR_X_OFFSET_PX,
         (frame_height / 2.0) + anchor_y_offset_for_range(rng),
     )
 
@@ -1042,6 +1047,7 @@ def main():
                 current_stop_threshold = FINGER_STOP_SEEKING_THRESHOLD
 
             anchor = build_tracking_anchor(frame_width, frame_height, stable_range)
+            anchor_x_offset_px = ANCHOR_X_OFFSET_PX
             anchor_y_offset_px = anchor_y_offset_for_range(stable_range)
 
             # Build our stable box (dynamic scalar)
@@ -1134,7 +1140,7 @@ def main():
             # Only print telemetry if desired
             if PRINT_TELEMETRY:
                 eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} anchor_yoff={anchor_y_offset_px:.1f} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
+                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} anchor_xoff={anchor_x_offset_px:.1f} anchor_yoff={anchor_y_offset_px:.1f} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
 
             # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
             if DRAW_FRAME_RT:
@@ -1164,7 +1170,7 @@ def main():
                         (f"state:{state_txt}", (10, 24), (40, 220, 40), 0.55),
                         (f"Radial distance = {radial_norm:.3f}", (10, 48), (40, 220, 40), 0.55),
                         (f"eye_px={eye_str} box={current_stable_scalar:.3f} {stable_range}", (10, 72), (40, 220, 40), 0.55),
-                        (f"anchor_y_offset={anchor_y_offset_px:.0f}px", (10, 96), (255, 255, 255), 0.55),
+                        (f"anchor_offsets=({anchor_x_offset_px:.0f}, {anchor_y_offset_px:.0f})px", (10, 96), (255, 255, 255), 0.55),
                         (f"light_mode:{current_light_mode}", (10, 120), (255, 255, 255), 0.55),
                         (f"gesture:{gesture_txt}", (10, 144), (255, 255, 255), 0.55),
                         ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 168), (255, 255, 255), 0.55),
