@@ -175,6 +175,7 @@ FIST_ENTER_FRAMES = 5
 PHOTO_COUNTDOWN_SEC = 2.0
 THUMB_TUCK_RATIO = 1.15
 THUMB_OPEN_RATIO = 1.35
+FOUR_THUMB_MAX_RATIO = 1.10
 FIST_CURLED_RATIO = 0.85
 THUMBS_UP_ENTER_FRAMES = 5
 FIVE_GESTURE_ENTER_FRAMES = 4
@@ -441,6 +442,7 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
             thumb_tip[1] > thumb_ip[1]
         )
         thumb_not_wide_open = thumb_to_index_mcp < (THUMB_OPEN_RATIO * palm_width)
+        thumb_neutral_for_four = thumb_to_index_mcp < (FOUR_THUMB_MAX_RATIO * palm_width)
         index_curled = math.hypot(index_tip[0] - index_mcp[0], index_tip[1] - index_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
         middle_curled = math.hypot(middle_tip[0] - index_mcp[0], middle_tip[1] - index_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
         ring_curled = math.hypot(ring_tip[0] - pinky_mcp[0], ring_tip[1] - pinky_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
@@ -453,7 +455,7 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
             middle_extended and
             ring_extended and
             pinky_extended and
-            thumb_not_wide_open
+            thumb_neutral_for_four
         )
         if hand_four:
             four_detected = True
