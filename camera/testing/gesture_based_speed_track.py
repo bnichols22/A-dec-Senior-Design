@@ -13,7 +13,7 @@
 #       - Four fingers -> resume mouth tracking
 #       - Two fingers -> start photo countdown and temporarily capture with face-track camera
 #       - Thumbs up -> re-enable motors
-#       - Five/open hand -> cut motors
+#       - Two closed fists on screen -> cut motors
 #
 # Motor lib usage:
 #   SimpleBGC SerialAPI shim:
@@ -178,7 +178,7 @@ THUMB_OPEN_RATIO = 1.35
 FOUR_THUMB_MAX_RATIO = 1.10
 FIST_CURLED_RATIO = 0.85
 THUMBS_UP_ENTER_FRAMES = 5
-FIVE_GESTURE_ENTER_FRAMES = 4
+TWO_FISTS_ENTER_FRAMES = 4
 THUMBS_UP_HEIGHT_RATIO = 0.35
 THUMBS_UP_CLEARANCE_RATIO = 0.18
 MOTOR_GESTURE_COOLDOWN_SEC = 1.0
@@ -388,12 +388,13 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
     two_detected = False
     four_detected = False
     best_pinch_ratio = 999.0
-    fist_detected = False
+    fist_count = 0
     thumbs_up_detected = False
-    five_detected = False
+    single_fist_detected = False
+    two_fists_detected = False
 
     if not hand_results.multi_hand_landmarks:
-        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, five_detected
+        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
 
     for hand_landmarks in hand_results.multi_hand_landmarks:
         lm = hand_landmarks.landmark
@@ -485,7 +486,7 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
             pinky_curled
         )
         if hand_fist:
-            fist_detected = True
+            fist_count += 1
 
         thumb_extended_up = (
             thumb_tip[1] < thumb_mcp[1] and
@@ -507,20 +508,10 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if hand_thumbs_up:
             thumbs_up_detected = True
 
-        hand_five = (
-            index_extended and
-            middle_extended and
-            ring_extended and
-            pinky_extended and
-            not thumb_tucked and
-            thumb_to_index_mcp >= (THUMB_OPEN_RATIO * 0.95 * palm_width) and
-            not pinch_detected and
-            not hand_four
-        )
-        if hand_five:
-            five_detected = True
+    single_fist_detected = (fist_count == 1)
+    two_fists_detected = (fist_count >= 2)
 
-    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, five_detected
+    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
 
 
 # ----------------------------------------------------------------------
@@ -609,7 +600,7 @@ def update_gesture_mode(
     pinch_detected,
     index_tip_point,
     four_detected,
-    fist_detected,
+    single_fist_detected,
     pinch_counter,
     four_counter,
     fist_counter,
@@ -619,7 +610,7 @@ def update_gesture_mode(
 ):
     reset_state = None
 
-    if fist_detected:
+    if single_fist_detected:
         fist_counter += 1
         if fist_counter >= FIST_ENTER_FRAMES:
             pinch_counter = 0
@@ -877,7 +868,7 @@ def main():
     pending_range = None
     pending_count = 0
     stable_scalar = STABLE_SCALAR_DEFAULT
-    motors_enabled = False
+    motors_enabled = bool(set_motors(1))
     last_motors_off_time = -999.0
 
     # Start gesture control in the locked state, equivalent to beginning with a fist.
@@ -887,7 +878,7 @@ def main():
     four_counter = 0
     fist_counter = 0
     thumbs_up_counter = 0
-    five_gesture_counter = 0
+    two_fists_counter = 0
     pinch_point = None
     # Photo capture is handled as a temporary overlay state so the main loop keeps running.
     photo_countdown_active = False
@@ -913,10 +904,6 @@ def main():
 
             current_time = time.time()
             frame_height, frame_width = frame.shape[:2]
-
-            if not motors_enabled:
-                set_motors(1)
-                motors_enabled = True
 
             # Update camera profile from ADC light mode every loop
             if adc_channels is not None:
@@ -945,24 +932,23 @@ def main():
             processed_image = face_mesh.process(rgb_frame_cap)
             hand_results = hands.process(rgb_frame_cap)
 
-            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, five_detected = detect_hand_gestures(
+            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, single_fist_detected, thumbs_up_detected, two_fists_detected = detect_hand_gestures(
                 hand_results,
                 frame_width,
                 frame_height
             )
 
-            if five_detected:
-                five_gesture_counter += 1
-                if five_gesture_counter >= FIVE_GESTURE_ENTER_FRAMES and motors_enabled:
+            if two_fists_detected:
+                two_fists_counter += 1
+                if two_fists_counter >= TWO_FISTS_ENTER_FRAMES and motors_enabled:
                     send_speeds(0.0, 0.0, 0.0)
-                    set_motors(0)
-                    motors_enabled = False
+                    motors_enabled = not bool(set_motors(0))
                     last_motors_off_time = current_time
-                    five_gesture_counter = 0
+                    two_fists_counter = 0
                     gesture_mode = GESTURE_LOCKED
                     prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
             else:
-                five_gesture_counter = 0
+                two_fists_counter = 0
 
             if thumbs_up_detected:
                 thumbs_up_counter += 1
@@ -971,10 +957,10 @@ def main():
                     not motors_enabled and
                     (current_time - last_motors_off_time) >= MOTOR_GESTURE_COOLDOWN_SEC
                 ):
-                    set_motors(1)
-                    motors_enabled = True
-                    thumbs_up_counter = 0
-                    prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
+                    if set_motors(1):
+                        motors_enabled = True
+                        thumbs_up_counter = 0
+                        prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
             else:
                 thumbs_up_counter = 0
 
@@ -1025,7 +1011,7 @@ def main():
                 pinch_detected,
                 index_tip_point,
                 four_detected,
-                fist_detected,
+                single_fist_detected,
                 pinch_counter,
                 four_counter,
                 fist_counter,
@@ -1052,7 +1038,7 @@ def main():
                         ("gesture:LOCKED", (10, 24), (0, 255, 255), 0.55),
                         ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
                         ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
-                        ("Thumbs up -> motors ON | Five -> motors OFF", (10, 96), (0, 255, 255), 0.55),
+                        ("Thumbs up -> motors ON | Two fists -> motors OFF", (10, 96), (0, 255, 255), 0.55),
                         (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 120), (255, 255, 255), 0.55),
                         (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
                     ],
@@ -1256,7 +1242,7 @@ def main():
                         (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
                         (f"gesture:{gesture_txt}", (10, 168), (255, 255, 255), 0.55),
                         ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 192), (255, 255, 255), 0.55),
-                        ("Two -> photo | Thumbs up -> motors ON | Five -> motors OFF", (10, 216), (255, 255, 255), 0.55),
+                        ("Two -> photo | Thumbs up -> motors ON | Two fists -> motors OFF", (10, 216), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
