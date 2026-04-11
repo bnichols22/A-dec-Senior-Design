@@ -11,7 +11,7 @@
 #       - Pinch + index finger -> fingertip tracking
 #       - Fist -> lock in place / hold position
 #       - Four fingers -> resume mouth tracking
-#       - Two fingers -> start photo countdown and capture with center camera
+#       - Two fingers -> start photo countdown and temporarily capture with face-track camera
 #
 # Motor lib usage:
 #   SimpleBGC SerialAPI shim:
@@ -42,13 +42,15 @@ LIB_PATH = os.path.expanduser(
 )
 
 CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
-# Photos from the center-facing camera are stored here during the gesture photo sequence.
+# Photos are temporarily captured from the face-tracking camera because the
+# center-camera cable is currently broken.
 PATIENT_PHOTO_DIR = os.path.join(BASE_DIR, "patient_photo")
 os.makedirs(PATIENT_PHOTO_DIR, exist_ok=True)
 
 # --------- Vision / tracker config ----------
-WIDE_ANGLE_CAM_INDEX = 2
-CENTER_CAM_INDEX = 0
+# WIDE_ANGLE_CAM_INDEX = 2  # Original dedicated face-tracking camera.
+FACE_TRACK_CAM_INDEX = 0  # Temporary single-camera setup.
+# CENTER_CAM_INDEX = 0  # Original photo-sequence camera.
 FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
@@ -120,6 +122,15 @@ EYE_DIST_NEAR_MIN  = 85.0   # >= this => NEAR (face big/close)
 STABLE_SCALAR_FAR  = 0.035  # small box when face is far
 STABLE_SCALAR_MID  = 0.060  # default
 STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
+
+# Tracking-anchor vertical compensation (pixels).
+# The face-tracking camera sits above the true light center, so the desired
+# mouth position in the camera image should be lower than image center.
+# We keep this discrete by distance bucket to avoid making the controller
+# continuously re-target itself.
+ANCHOR_Y_OFFSET_FAR_PX = 20.0
+ANCHOR_Y_OFFSET_MID_PX = 38.0
+ANCHOR_Y_OFFSET_NEAR_PX = 58.0
 
 # Prevent flicker: require N consecutive frames to accept a new range
 RANGE_SWITCH_FRAMES = 8
@@ -229,6 +240,19 @@ def scalar_for_range(rng):
     if rng == "NEAR":
         return STABLE_SCALAR_NEAR
     return STABLE_SCALAR_MID
+
+def anchor_y_offset_for_range(rng):
+    if rng == "FAR":
+        return ANCHOR_Y_OFFSET_FAR_PX
+    if rng == "NEAR":
+        return ANCHOR_Y_OFFSET_NEAR_PX
+    return ANCHOR_Y_OFFSET_MID_PX
+
+def build_tracking_anchor(frame_width, frame_height, rng):
+    return (
+        frame_width / 2.0,
+        (frame_height / 2.0) + anchor_y_offset_for_range(rng),
+    )
 
 # If the histogram was removed, this coudl be deleted
 class TimedHistogram:
@@ -692,15 +716,16 @@ def show_runtime_frame(window_name, frame, overlay_lines):
     cv2.imshow(window_name, frame)
     return (cv2.waitKey(1) & 0xFF) == 27
 
-def capture_patient_photo(center_camera):
-    if center_camera is None:
-        print("capture_patient_photo: center_camera unavailable")
+def capture_patient_photo(face_track_cam):
+    if face_track_cam is None:
+        print("capture_patient_photo: face_track_cam unavailable")
         return False, None
 
-    # Grab a single still frame from the center camera and save it with a unique timestamp.
-    frame_read, photo_frame = center_camera.read()
+    # Temporary fallback: use the face-tracking camera for the photo sequence
+    # while the dedicated center-camera cable is broken.
+    frame_read, photo_frame = face_track_cam.read()
     if not frame_read:
-        print("capture_patient_photo: failed to read frame from center_camera")
+        print("capture_patient_photo: failed to read frame from face_track_cam")
         return False, None
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -742,17 +767,11 @@ def main():
     )
 
     # Create capture device object and verify it constructed
-    face_track_cam = cv2.VideoCapture(WIDE_ANGLE_CAM_INDEX)
+    face_track_cam = cv2.VideoCapture(FACE_TRACK_CAM_INDEX)
     if not face_track_cam.isOpened():
-        print(f'main: Error Unable to open camera from {WIDE_ANGLE_CAM_INDEX}')
+        print(f'main: Error Unable to open camera from {FACE_TRACK_CAM_INDEX}')
         # Exit here because we cannot run without camera
         sys.exit(1)
-
-    center_camera = cv2.VideoCapture(CENTER_CAM_INDEX)
-    if not center_camera.isOpened():
-        print(f"main: Warning unable to open center_camera from {CENTER_CAM_INDEX}")
-        center_camera.release()
-        center_camera = None
 
     adc_channels = init_adc_channels()
 
@@ -768,8 +787,6 @@ def main():
 
     # Set the max number of stored frames allowed
     face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
-    if center_camera is not None:
-        center_camera.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
 
     # Clear test log
     try:
@@ -786,8 +803,6 @@ def main():
     prev_smoothed = None
     prev_time = None
     consecutive_lost_frames = 0
-
-    anchor = None
 
     # State names
     LOCKED, SEEKING = 0, 1
@@ -869,9 +884,6 @@ def main():
                 current_light_mode = LIGHT_OFF_MODE
                 light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
 
-            if anchor is None:
-                anchor = (frame_width / 2.0, frame_height / 2.0)
-
             # Normal tracking mode
             # get the capture from camera
             rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -897,7 +909,7 @@ def main():
                 remaining_photo_time = max(0.0, PHOTO_COUNTDOWN_SEC - elapsed_photo_time)
 
                 if elapsed_photo_time >= PHOTO_COUNTDOWN_SEC:
-                    photo_ok, photo_path = capture_patient_photo(center_camera)
+                    photo_ok, photo_path = capture_patient_photo(face_track_cam)
                     photo_countdown_active = False
                     gesture_mode = photo_return_mode
                     prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
@@ -1029,6 +1041,9 @@ def main():
                 current_stable_scalar *= FINGER_STABLE_SCALAR_MULT
                 current_stop_threshold = FINGER_STOP_SEEKING_THRESHOLD
 
+            anchor = build_tracking_anchor(frame_width, frame_height, stable_range)
+            anchor_y_offset_px = anchor_y_offset_for_range(stable_range)
+
             # Build our stable box (dynamic scalar)
             stable_box = build_stable_box(anchor, frame_width, frame_height, current_stable_scalar)
             # Determine if we are in the stable region
@@ -1119,7 +1134,7 @@ def main():
             # Only print telemetry if desired
             if PRINT_TELEMETRY:
                 eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
+                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} anchor_yoff={anchor_y_offset_px:.1f} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
 
             # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
             if DRAW_FRAME_RT:
@@ -1149,10 +1164,11 @@ def main():
                         (f"state:{state_txt}", (10, 24), (40, 220, 40), 0.55),
                         (f"Radial distance = {radial_norm:.3f}", (10, 48), (40, 220, 40), 0.55),
                         (f"eye_px={eye_str} box={current_stable_scalar:.3f} {stable_range}", (10, 72), (40, 220, 40), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 96), (255, 255, 255), 0.55),
-                        (f"gesture:{gesture_txt}", (10, 120), (255, 255, 255), 0.55),
-                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 144), (255, 255, 255), 0.55),
-                        ("Two -> 2s countdown then center photo", (10, 168), (255, 255, 255), 0.55),
+                        (f"anchor_y_offset={anchor_y_offset_px:.0f}px", (10, 96), (255, 255, 255), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 120), (255, 255, 255), 0.55),
+                        (f"gesture:{gesture_txt}", (10, 144), (255, 255, 255), 0.55),
+                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 168), (255, 255, 255), 0.55),
+                        ("Two -> 2s countdown then tracking-cam photo", (10, 192), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
@@ -1170,8 +1186,6 @@ def main():
         hands.close()
         face_mesh.close()
         face_track_cam.release()
-        if center_camera is not None:
-            center_camera.release()
         cv2.destroyAllWindows()
 
         print("Stopped.")
