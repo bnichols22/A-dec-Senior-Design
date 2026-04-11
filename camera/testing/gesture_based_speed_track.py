@@ -176,8 +176,11 @@ PHOTO_COUNTDOWN_SEC = 2.0
 THUMB_TUCK_RATIO = 1.15
 THUMB_OPEN_RATIO = 1.35
 FIST_CURLED_RATIO = 0.85
-THUMBS_UP_ENTER_FRAMES = 3
+THUMBS_UP_ENTER_FRAMES = 5
 X_GESTURE_ENTER_FRAMES = 3
+THUMBS_UP_HEIGHT_RATIO = 0.35
+THUMBS_UP_CLEARANCE_RATIO = 0.18
+MOTOR_GESTURE_COOLDOWN_SEC = 1.0
 
 FINGER_SMOOTH_ALPHA = 0.45
 FINGER_CMD_SPEED_EMA_ALPHA = 0.55
@@ -496,13 +499,18 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
             thumb_tip[1] < thumb_mcp[1] and
             thumb_tip[1] < wrist[1]
         )
+        thumb_above_index_mcp = thumb_tip[1] < (index_mcp[1] - (THUMBS_UP_CLEARANCE_RATIO * palm_width))
+        thumb_height = abs(thumb_tip[1] - thumb_mcp[1])
         hand_thumbs_up = (
             thumb_extended_up and
+            thumb_above_index_mcp and
+            thumb_height > (THUMBS_UP_HEIGHT_RATIO * palm_width) and
             not index_extended and
             not middle_extended and
             not ring_extended and
             not pinky_extended and
-            not hand_fist
+            not hand_fist and
+            not pinch_detected
         )
         if hand_thumbs_up:
             thumbs_up_detected = True
@@ -886,6 +894,7 @@ def main():
     pending_count = 0
     stable_scalar = STABLE_SCALAR_DEFAULT
     motors_enabled = False
+    last_motors_off_time = -999.0
 
     # Start gesture control in the locked state, equivalent to beginning with a fist.
     gesture_mode = GESTURE_LOCKED
@@ -964,6 +973,7 @@ def main():
                     send_speeds(0.0, 0.0, 0.0)
                     set_motors(0)
                     motors_enabled = False
+                    last_motors_off_time = current_time
                     x_gesture_counter = 0
                     gesture_mode = GESTURE_LOCKED
                     prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
@@ -972,7 +982,11 @@ def main():
 
             if thumbs_up_detected:
                 thumbs_up_counter += 1
-                if thumbs_up_counter >= THUMBS_UP_ENTER_FRAMES and not motors_enabled:
+                if (
+                    thumbs_up_counter >= THUMBS_UP_ENTER_FRAMES and
+                    not motors_enabled and
+                    (current_time - last_motors_off_time) >= MOTOR_GESTURE_COOLDOWN_SEC
+                ):
                     set_motors(1)
                     motors_enabled = True
                     thumbs_up_counter = 0
