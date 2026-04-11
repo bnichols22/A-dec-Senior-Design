@@ -13,7 +13,7 @@
 #       - Four fingers -> resume mouth tracking
 #       - Two fingers -> start photo countdown and temporarily capture with face-track camera
 #       - Thumbs up -> re-enable motors
-#       - Crossed index fingers (X) -> cut motors
+#       - Five/open hand -> cut motors
 #
 # Motor lib usage:
 #   SimpleBGC SerialAPI shim:
@@ -177,7 +177,7 @@ THUMB_TUCK_RATIO = 1.15
 THUMB_OPEN_RATIO = 1.35
 FIST_CURLED_RATIO = 0.85
 THUMBS_UP_ENTER_FRAMES = 5
-X_GESTURE_ENTER_FRAMES = 3
+FIVE_GESTURE_ENTER_FRAMES = 4
 THUMBS_UP_HEIGHT_RATIO = 0.35
 THUMBS_UP_CLEARANCE_RATIO = 0.18
 MOTOR_GESTURE_COOLDOWN_SEC = 1.0
@@ -380,15 +380,6 @@ def landmark_to_pixel(landmark, frame_width, frame_height):
 def finger_extended(tip_point, pip_point):
     return tip_point[1] < pip_point[1]
 
-def ccw(point_a, point_b, point_c):
-    return ((point_c[1] - point_a[1]) * (point_b[0] - point_a[0])) > ((point_b[1] - point_a[1]) * (point_c[0] - point_a[0]))
-
-def segments_intersect(seg1_start, seg1_end, seg2_start, seg2_end):
-    return (
-        ccw(seg1_start, seg2_start, seg2_end) != ccw(seg1_end, seg2_start, seg2_end) and
-        ccw(seg1_start, seg1_end, seg2_start) != ccw(seg1_start, seg1_end, seg2_end)
-    )
-
 def detect_hand_gestures(hand_results, frame_width, frame_height):
     pinch_detected = False
     pinch_start_point = None
@@ -398,11 +389,10 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
     best_pinch_ratio = 999.0
     fist_detected = False
     thumbs_up_detected = False
-    x_gesture_detected = False
-    x_candidate_segments = []
+    five_detected = False
 
     if not hand_results.multi_hand_landmarks:
-        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, x_gesture_detected
+        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, five_detected
 
     for hand_landmarks in hand_results.multi_hand_landmarks:
         lm = hand_landmarks.landmark
@@ -515,28 +505,20 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if hand_thumbs_up:
             thumbs_up_detected = True
 
-        hand_x_candidate = (
+        hand_five = (
             index_extended and
-            not middle_extended and
-            not ring_extended and
-            not pinky_extended and
-            not pinch_detected
+            middle_extended and
+            ring_extended and
+            pinky_extended and
+            not thumb_tucked and
+            thumb_to_index_mcp >= (THUMB_OPEN_RATIO * 0.95 * palm_width) and
+            not pinch_detected and
+            not hand_four
         )
-        if hand_x_candidate:
-            x_candidate_segments.append((index_mcp, index_tip))
+        if hand_five:
+            five_detected = True
 
-    if len(x_candidate_segments) >= 2:
-        for first_idx in range(len(x_candidate_segments) - 1):
-            for second_idx in range(first_idx + 1, len(x_candidate_segments)):
-                seg1_start, seg1_end = x_candidate_segments[first_idx]
-                seg2_start, seg2_end = x_candidate_segments[second_idx]
-                if segments_intersect(seg1_start, seg1_end, seg2_start, seg2_end):
-                    x_gesture_detected = True
-                    break
-            if x_gesture_detected:
-                break
-
-    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, x_gesture_detected
+    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, five_detected
 
 
 # ----------------------------------------------------------------------
@@ -903,7 +885,7 @@ def main():
     four_counter = 0
     fist_counter = 0
     thumbs_up_counter = 0
-    x_gesture_counter = 0
+    five_gesture_counter = 0
     pinch_point = None
     # Photo capture is handled as a temporary overlay state so the main loop keeps running.
     photo_countdown_active = False
@@ -961,24 +943,24 @@ def main():
             processed_image = face_mesh.process(rgb_frame_cap)
             hand_results = hands.process(rgb_frame_cap)
 
-            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, x_gesture_detected = detect_hand_gestures(
+            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, five_detected = detect_hand_gestures(
                 hand_results,
                 frame_width,
                 frame_height
             )
 
-            if x_gesture_detected:
-                x_gesture_counter += 1
-                if x_gesture_counter >= X_GESTURE_ENTER_FRAMES and motors_enabled:
+            if five_detected:
+                five_gesture_counter += 1
+                if five_gesture_counter >= FIVE_GESTURE_ENTER_FRAMES and motors_enabled:
                     send_speeds(0.0, 0.0, 0.0)
                     set_motors(0)
                     motors_enabled = False
                     last_motors_off_time = current_time
-                    x_gesture_counter = 0
+                    five_gesture_counter = 0
                     gesture_mode = GESTURE_LOCKED
                     prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
             else:
-                x_gesture_counter = 0
+                five_gesture_counter = 0
 
             if thumbs_up_detected:
                 thumbs_up_counter += 1
@@ -1068,7 +1050,7 @@ def main():
                         ("gesture:LOCKED", (10, 24), (0, 255, 255), 0.55),
                         ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
                         ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
-                        ("Thumbs up -> motors ON | X fingers -> motors OFF", (10, 96), (0, 255, 255), 0.55),
+                        ("Thumbs up -> motors ON | Five -> motors OFF", (10, 96), (0, 255, 255), 0.55),
                         (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 120), (255, 255, 255), 0.55),
                         (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
                     ],
@@ -1272,7 +1254,7 @@ def main():
                         (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
                         (f"gesture:{gesture_txt}", (10, 168), (255, 255, 255), 0.55),
                         ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 192), (255, 255, 255), 0.55),
-                        ("Two -> photo | Thumbs up -> motors ON | X -> motors OFF", (10, 216), (255, 255, 255), 0.55),
+                        ("Two -> photo | Thumbs up -> motors ON | Five -> motors OFF", (10, 216), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
