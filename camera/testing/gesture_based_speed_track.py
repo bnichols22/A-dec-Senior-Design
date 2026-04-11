@@ -12,6 +12,8 @@
 #       - Fist -> lock in place / hold position
 #       - Four fingers -> resume mouth tracking
 #       - Two fingers -> start photo countdown and temporarily capture with face-track camera
+#       - Thumbs up -> re-enable motors
+#       - Crossed index fingers (X) -> cut motors
 #
 # Motor lib usage:
 #   SimpleBGC SerialAPI shim:
@@ -174,6 +176,8 @@ PHOTO_COUNTDOWN_SEC = 2.0
 THUMB_TUCK_RATIO = 1.15
 THUMB_OPEN_RATIO = 1.35
 FIST_CURLED_RATIO = 0.85
+THUMBS_UP_ENTER_FRAMES = 3
+X_GESTURE_ENTER_FRAMES = 3
 
 FINGER_SMOOTH_ALPHA = 0.45
 FINGER_CMD_SPEED_EMA_ALPHA = 0.55
@@ -373,6 +377,15 @@ def landmark_to_pixel(landmark, frame_width, frame_height):
 def finger_extended(tip_point, pip_point):
     return tip_point[1] < pip_point[1]
 
+def ccw(point_a, point_b, point_c):
+    return ((point_c[1] - point_a[1]) * (point_b[0] - point_a[0])) > ((point_b[1] - point_a[1]) * (point_c[0] - point_a[0]))
+
+def segments_intersect(seg1_start, seg1_end, seg2_start, seg2_end):
+    return (
+        ccw(seg1_start, seg2_start, seg2_end) != ccw(seg1_end, seg2_start, seg2_end) and
+        ccw(seg1_start, seg1_end, seg2_start) != ccw(seg1_start, seg1_end, seg2_end)
+    )
+
 def detect_hand_gestures(hand_results, frame_width, frame_height):
     pinch_detected = False
     pinch_start_point = None
@@ -381,12 +394,17 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
     four_detected = False
     best_pinch_ratio = 999.0
     fist_detected = False
+    thumbs_up_detected = False
+    x_gesture_detected = False
+    x_candidate_segments = []
 
     if not hand_results.multi_hand_landmarks:
-        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected
+        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, x_gesture_detected
 
     for hand_landmarks in hand_results.multi_hand_landmarks:
         lm = hand_landmarks.landmark
+
+        wrist = landmark_to_pixel(lm[0], frame_width, frame_height)
 
         thumb_tip = landmark_to_pixel(lm[4], frame_width, frame_height)
         thumb_ip = landmark_to_pixel(lm[3], frame_width, frame_height)
@@ -474,7 +492,43 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if hand_fist:
             fist_detected = True
 
-    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected
+        thumb_extended_up = (
+            thumb_tip[1] < thumb_mcp[1] and
+            thumb_tip[1] < wrist[1]
+        )
+        hand_thumbs_up = (
+            thumb_extended_up and
+            not index_extended and
+            not middle_extended and
+            not ring_extended and
+            not pinky_extended and
+            not hand_fist
+        )
+        if hand_thumbs_up:
+            thumbs_up_detected = True
+
+        hand_x_candidate = (
+            index_extended and
+            not middle_extended and
+            not ring_extended and
+            not pinky_extended and
+            not pinch_detected
+        )
+        if hand_x_candidate:
+            x_candidate_segments.append((index_mcp, index_tip))
+
+    if len(x_candidate_segments) >= 2:
+        for first_idx in range(len(x_candidate_segments) - 1):
+            for second_idx in range(first_idx + 1, len(x_candidate_segments)):
+                seg1_start, seg1_end = x_candidate_segments[first_idx]
+                seg2_start, seg2_end = x_candidate_segments[second_idx]
+                if segments_intersect(seg1_start, seg1_end, seg2_start, seg2_end):
+                    x_gesture_detected = True
+                    break
+            if x_gesture_detected:
+                break
+
+    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, x_gesture_detected
 
 
 # ----------------------------------------------------------------------
@@ -839,6 +893,8 @@ def main():
     two_counter = 0
     four_counter = 0
     fist_counter = 0
+    thumbs_up_counter = 0
+    x_gesture_counter = 0
     pinch_point = None
     # Photo capture is handled as a temporary overlay state so the main loop keeps running.
     photo_countdown_active = False
@@ -896,11 +952,33 @@ def main():
             processed_image = face_mesh.process(rgb_frame_cap)
             hand_results = hands.process(rgb_frame_cap)
 
-            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected = detect_hand_gestures(
+            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected, thumbs_up_detected, x_gesture_detected = detect_hand_gestures(
                 hand_results,
                 frame_width,
                 frame_height
             )
+
+            if x_gesture_detected:
+                x_gesture_counter += 1
+                if x_gesture_counter >= X_GESTURE_ENTER_FRAMES and motors_enabled:
+                    send_speeds(0.0, 0.0, 0.0)
+                    set_motors(0)
+                    motors_enabled = False
+                    x_gesture_counter = 0
+                    gesture_mode = GESTURE_LOCKED
+                    prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
+            else:
+                x_gesture_counter = 0
+
+            if thumbs_up_detected:
+                thumbs_up_counter += 1
+                if thumbs_up_counter >= THUMBS_UP_ENTER_FRAMES and not motors_enabled:
+                    set_motors(1)
+                    motors_enabled = True
+                    thumbs_up_counter = 0
+                    prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
+            else:
+                thumbs_up_counter = 0
 
             if not two_detected:
                 two_counter = 0
@@ -908,7 +986,7 @@ def main():
 
             if photo_countdown_active:
                 # Hold the head still while counting down; this avoids blocking the rest of the loop.
-                last_send_time = send_zero_if_due(current_time, last_send_time)
+                last_send_time = send_zero_if_due(current_time, last_send_time, motors_enabled)
 
                 elapsed_photo_time = current_time - photo_countdown_start
                 remaining_photo_time = max(0.0, PHOTO_COUNTDOWN_SEC - elapsed_photo_time)
@@ -966,7 +1044,7 @@ def main():
                 centroid = pinch_point
 
             if gesture_mode == GESTURE_LOCKED:
-                last_send_time = send_zero_if_due(current_time, last_send_time)
+                last_send_time = send_zero_if_due(current_time, last_send_time, motors_enabled)
 
                 draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 if show_runtime_frame(
@@ -976,7 +1054,9 @@ def main():
                         ("gesture:LOCKED", (10, 24), (0, 255, 255), 0.55),
                         ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
                         ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 96), (255, 255, 255), 0.55),
+                        ("Thumbs up -> motors ON | X fingers -> motors OFF", (10, 96), (0, 255, 255), 0.55),
+                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 120), (255, 255, 255), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
@@ -986,7 +1066,7 @@ def main():
             if centroid is None:
                 consecutive_lost_frames += 1
                 # if we lose tracking hold
-                last_send_time = send_zero_if_due(current_time, last_send_time)
+                last_send_time = send_zero_if_due(current_time, last_send_time, motors_enabled)
 
                 # Check how many consecutive_lost_frames frames we have
                 if consecutive_lost_frames > MAX_LOST_FRAMES:
@@ -1132,15 +1212,18 @@ def main():
                 smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, cmd_alpha)
                 smooth_roll_dps = ema_scalar(roll_dps, smooth_roll_dps, cmd_alpha)
 
-                ok_send = send_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
-                if ok_send:
+                if motors_enabled:
+                    ok_send = send_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
+                    if ok_send:
+                        last_send_time = current_time
+                        sent = 1
+                else:
                     last_send_time = current_time
-                    sent = 1
 
             # Only print telemetry if desired
             if PRINT_TELEMETRY:
                 eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} anchor_xoff={anchor_x_offset_px:.1f} anchor_yoff={anchor_y_offset_px:.1f} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
+                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} anchor_xoff={anchor_x_offset_px:.1f} anchor_yoff={anchor_y_offset_px:.1f} motors={'ON' if motors_enabled else 'OFF'} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
 
             # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
             if DRAW_FRAME_RT:
@@ -1171,10 +1254,11 @@ def main():
                         (f"Radial distance = {radial_norm:.3f}", (10, 48), (40, 220, 40), 0.55),
                         (f"eye_px={eye_str} box={current_stable_scalar:.3f} {stable_range}", (10, 72), (40, 220, 40), 0.55),
                         (f"anchor_offsets=({anchor_x_offset_px:.0f}, {anchor_y_offset_px:.0f})px", (10, 96), (255, 255, 255), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 120), (255, 255, 255), 0.55),
-                        (f"gesture:{gesture_txt}", (10, 144), (255, 255, 255), 0.55),
-                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 168), (255, 255, 255), 0.55),
-                        ("Two -> 2s countdown then tracking-cam photo", (10, 192), (255, 255, 255), 0.55),
+                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 120), (255, 255, 255), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
+                        (f"gesture:{gesture_txt}", (10, 168), (255, 255, 255), 0.55),
+                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 192), (255, 255, 255), 0.55),
+                        ("Two -> photo | Thumbs up -> motors ON | X -> motors OFF", (10, 216), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
