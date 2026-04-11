@@ -250,10 +250,14 @@ def update_camera_settings(camera, filename, profile_dir):
         return False
 
 def read_light_mode(adc_channels, off_threshold_volts):
-    v0 = adc_channels["A0"].voltage
-    v1 = adc_channels["A1"].voltage
-    v2 = adc_channels["A2"].voltage
-    v3 = adc_channels["A3"].voltage
+    try:
+        v0 = adc_channels["A0"].voltage
+        v1 = adc_channels["A1"].voltage
+        v2 = adc_channels["A2"].voltage
+        v3 = adc_channels["A3"].voltage
+    except Exception as adc_read_error:
+        print(f"ADC read unavailable, disabling light-mode updates: {adc_read_error}")
+        return None, None
 
     voltage_map = {
         YELLOW_LIGHT_MODE:  v0,
@@ -493,13 +497,20 @@ def main():
 
             # Update camera profile from ADC light mode every loop
             if adc_channels is not None:
-                current_light_mode, light_mode_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
-                previous_light_mode = update_camera_profile_from_light_mode(
-                    face_track_cam,
-                    current_light_mode,
-                    previous_light_mode,
-                    CAMERA_PROFILE_DIR
-                )
+                read_mode, read_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
+                if read_mode is None:
+                    adc_channels = None
+                    current_light_mode = LIGHT_OFF_MODE
+                    light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
+                else:
+                    current_light_mode = read_mode
+                    light_mode_voltages = read_voltages
+                    previous_light_mode = update_camera_profile_from_light_mode(
+                        face_track_cam,
+                        current_light_mode,
+                        previous_light_mode,
+                        CAMERA_PROFILE_DIR
+                    )
             else:
                 current_light_mode = LIGHT_OFF_MODE
                 light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
