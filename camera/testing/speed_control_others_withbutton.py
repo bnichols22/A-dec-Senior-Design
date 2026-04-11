@@ -40,7 +40,7 @@ LIB_PATH = os.path.expanduser(
 CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
 
 # --------- Vision / tracker config ----------
-CAM_INDEX = 0
+CAM_INDEX = 2  # wide-angle camera; center camera is index 0
 FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
