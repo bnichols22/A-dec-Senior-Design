@@ -149,11 +149,13 @@ GESTURE_LOCKED = 2
 HAND_DETECTION_CONFIDENCE = 0.75
 HAND_TRACKING_CONFIDENCE = 0.75
 PINCH_ENTER_FRAMES = 5
-FOUR_ENTER_FRAMES = 5
-TWO_ENTER_FRAMES = 5
+FOUR_ENTER_FRAMES = 3
+TWO_ENTER_FRAMES = 3
 PINCH_DISTANCE_RATIO = 0.28
 FIST_ENTER_FRAMES = 5
 PHOTO_COUNTDOWN_SEC = 2.0
+THUMB_TUCK_RATIO = 1.15
+THUMB_OPEN_RATIO = 1.35
 
 FINGER_SMOOTH_ALPHA = 0.45
 FINGER_CMD_SPEED_EMA_ALPHA = 0.55
@@ -393,27 +395,32 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
             pinch_start_point = ((thumb_tip[0] + index_tip[0]) / 2.0, (thumb_tip[1] + index_tip[1]) / 2.0)
 
         thumb_tucked = (
-            thumb_to_index_mcp < (0.95 * palm_width) and
+            thumb_to_index_mcp < (THUMB_TUCK_RATIO * palm_width) or
             thumb_tip[1] > thumb_ip[1]
         )
-        # Four fingers extended with thumb tucked resumes normal mouth tracking.
+        thumb_not_wide_open = thumb_to_index_mcp < (THUMB_OPEN_RATIO * palm_width)
+
+        # Four fingers extended resumes normal mouth tracking.
+        # The thumb is allowed to be neutral or loosely tucked so this is easier to trigger.
         hand_four = (
             index_extended and
             middle_extended and
             ring_extended and
             pinky_extended and
-            thumb_tucked
+            thumb_not_wide_open
         )
         if hand_four:
             four_detected = True
 
-        # Two fingers extended with thumb tucked starts the patient photo countdown.
+        # Two fingers extended starts the patient photo countdown.
+        # Allow a relaxed thumb so the gesture is easier to hold.
         hand_two = (
             index_extended and
             middle_extended and
             not ring_extended and
             not pinky_extended and
-            thumb_tucked
+            thumb_not_wide_open and
+            not pinch_detected
         )
         if hand_two:
             two_detected = True
