@@ -286,6 +286,21 @@ def update_camera_profile_from_light_mode(camera, current_light_mode, previous_l
 
     return previous_light_mode
 
+def init_adc_channels():
+    try:
+        i2c = busio.I2C(board.SCL, board.SDA)
+        ads = ADS1115(i2c)
+        ads.gain = 1
+        return {
+            "A0": AnalogIn(ads, ads1x15.Pin.A0),
+            "A1": AnalogIn(ads, ads1x15.Pin.A1),
+            "A2": AnalogIn(ads, ads1x15.Pin.A2),
+            "A3": AnalogIn(ads, ads1x15.Pin.A3),
+        }
+    except Exception as adc_error:
+        print(f"ADC init unavailable, continuing without light-mode updates: {adc_error}")
+        return None
+
 
 # ----------------------------------------------------------------------
 # SBGC shim bindings (ctypes)
@@ -395,36 +410,28 @@ def main():
     # Save to current directory
     out = cv2.VideoWriter('face_track_demo.avi', fourcc, 20.0, (frame_width, frame_height))
 
-    # Create ADC object and channels
-    i2c = busio.I2C(board.SCL, board.SDA)
-    ads = ADS1115(i2c)
-    ads.gain = 1
-
-    adc_channels = {
-        "A0": AnalogIn(ads, ads1x15.Pin.A0),
-        "A1": AnalogIn(ads, ads1x15.Pin.A1),
-        "A2": AnalogIn(ads, ads1x15.Pin.A2),
-        "A3": AnalogIn(ads, ads1x15.Pin.A3),
-    }
+    adc_channels = init_adc_channels()
 
     current_light_mode = LIGHT_OFF_MODE
     previous_light_mode = None
-    previous_light_mode = update_camera_profile_from_light_mode(
-        face_track_cam,
-        current_light_mode,
-        previous_light_mode,
-        CAMERA_PROFILE_DIR
-    )
+    if adc_channels is not None:
+        previous_light_mode = update_camera_profile_from_light_mode(
+            face_track_cam,
+            current_light_mode,
+            previous_light_mode,
+            CAMERA_PROFILE_DIR
+        )
 
     # Set the max number of stored frames allowed
     face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
 
     # Clear test log
     try:
-        with open(LOG_PATH, "w") as log_file:
-            log_file.write(f"Filename: {file_name}\n")
-            log_file.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            log_file.write(f"--------------------------------------------------------\n")
+        log_file = open(LOG_PATH, "w")
+        log_file.write(f"Filename: {file_name}\n")
+        log_file.write(f"# Start time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log_file.write(f"--------------------------------------------------------\n")
+        log_file.flush()
         sys.stderr = log_file
     except Exception:
         print("Unable to open log file")
@@ -459,7 +466,7 @@ def main():
     pending_range = None
     pending_count = 0
     stable_scalar = STABLE_SCALAR_DEFAULT
-    set_motors(1)
+    motors_enabled = False
 
     # ======= Main Loop =======
     try:
@@ -480,14 +487,22 @@ def main():
             current_time = time.time()
             frame_height, frame_width = frame.shape[:2]
 
+            if not motors_enabled:
+                set_motors(1)
+                motors_enabled = True
+
             # Update camera profile from ADC light mode every loop
-            current_light_mode, light_mode_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
-            previous_light_mode = update_camera_profile_from_light_mode(
-                face_track_cam,
-                current_light_mode,
-                previous_light_mode,
-                CAMERA_PROFILE_DIR
-            )
+            if adc_channels is not None:
+                current_light_mode, light_mode_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
+                previous_light_mode = update_camera_profile_from_light_mode(
+                    face_track_cam,
+                    current_light_mode,
+                    previous_light_mode,
+                    CAMERA_PROFILE_DIR
+                )
+            else:
+                current_light_mode = LIGHT_OFF_MODE
+                light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
 
             if anchor is None:
                 anchor = (frame_width / 2.0, frame_height / 2.0)
@@ -727,4 +742,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as main_error:
+        print(f"Fatal error: {main_error}")
+        raise
