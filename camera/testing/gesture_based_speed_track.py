@@ -132,7 +132,7 @@ STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
 # Horizontal compensation is a small fixed offset because the camera is only
 # slightly left/right of the true light center compared with the stronger
 # vertical offset from being mounted above it.
-ANCHOR_X_OFFSET_PX = 10.0
+ANCHOR_X_OFFSET_PX = -10.0
 ANCHOR_Y_OFFSET_FAR_PX = 20.0
 ANCHOR_Y_OFFSET_MID_PX = 38.0
 ANCHOR_Y_OFFSET_NEAR_PX = 58.0
