@@ -9,8 +9,9 @@
 #       proxy using FaceMesh eye distance (in pixels). Closer face => bigger box.
 #   (2) Gesture-driven tracking mode control:
 #       - Pinch + index finger -> fingertip tracking
-#       - Fist -> lock in place
+#       - Fist -> lock in place / hold position
 #       - Four fingers -> resume mouth tracking
+#       - Two fingers -> start photo countdown and capture with center camera
 #
 # Motor lib usage:
 #   SimpleBGC SerialAPI shim:
@@ -156,6 +157,7 @@ FIST_ENTER_FRAMES = 5
 PHOTO_COUNTDOWN_SEC = 2.0
 THUMB_TUCK_RATIO = 1.15
 THUMB_OPEN_RATIO = 1.35
+FIST_CURLED_RATIO = 0.85
 
 FINGER_SMOOTH_ALPHA = 0.45
 FINGER_CMD_SPEED_EMA_ALPHA = 0.55
@@ -399,6 +401,10 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
             thumb_tip[1] > thumb_ip[1]
         )
         thumb_not_wide_open = thumb_to_index_mcp < (THUMB_OPEN_RATIO * palm_width)
+        index_curled = math.hypot(index_tip[0] - index_mcp[0], index_tip[1] - index_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
+        middle_curled = math.hypot(middle_tip[0] - index_mcp[0], middle_tip[1] - index_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
+        ring_curled = math.hypot(ring_tip[0] - pinky_mcp[0], ring_tip[1] - pinky_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
+        pinky_curled = math.hypot(pinky_tip[0] - pinky_mcp[0], pinky_tip[1] - pinky_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
 
         # Four fingers extended resumes normal mouth tracking.
         # The thumb is allowed to be neutral or loosely tucked so this is easier to trigger.
@@ -429,7 +435,12 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
             not index_extended and
             not middle_extended and
             not ring_extended and
-            not pinky_extended
+            not pinky_extended and
+            thumb_tucked and
+            index_curled and
+            middle_curled and
+            ring_curled and
+            pinky_curled
         )
         if hand_fist:
             fist_detected = True
