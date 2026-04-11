@@ -279,10 +279,14 @@ def update_camera_settings(camera, filename, profile_dir):
         return False
 
 def read_light_mode(adc_channels, off_threshold_volts):
-    v0 = adc_channels["A0"].voltage
-    v1 = adc_channels["A1"].voltage
-    v2 = adc_channels["A2"].voltage
-    v3 = adc_channels["A3"].voltage
+    try:
+        v0 = adc_channels["A0"].voltage
+        v1 = adc_channels["A1"].voltage
+        v2 = adc_channels["A2"].voltage
+        v3 = adc_channels["A3"].voltage
+    except Exception as adc_read_error:
+        print(f"ADC read unavailable, disabling light-mode updates: {adc_read_error}")
+        return None, None
 
     voltage_map = {
         YELLOW_LIGHT_MODE:  v0,
@@ -314,6 +318,21 @@ def update_camera_profile_from_light_mode(camera, current_light_mode, previous_l
         return current_light_mode
 
     return previous_light_mode
+
+def init_adc_channels():
+    try:
+        i2c = busio.I2C(board.SCL, board.SDA)
+        ads = ADS1115(i2c)
+        ads.gain = 1
+        return {
+            "A0": AnalogIn(ads, ads1x15.Pin.A0),
+            "A1": AnalogIn(ads, ads1x15.Pin.A1),
+            "A2": AnalogIn(ads, ads1x15.Pin.A2),
+            "A3": AnalogIn(ads, ads1x15.Pin.A3),
+        }
+    except Exception as adc_error:
+        print(f"ADC init unavailable, continuing without light-mode updates: {adc_error}")
+        return None
 
 def landmark_to_pixel(landmark, frame_width, frame_height):
     return (landmark.x * frame_width, landmark.y * frame_height)
@@ -661,7 +680,7 @@ def capture_patient_photo(center_camera):
         return False, None
 
     # Grab a single still frame from the center camera and save it with a unique timestamp.
-    frame_read, center_frame = center_camera.read()
+    frame_read, photo_frame = center_camera.read()
     if not frame_read:
         print("capture_patient_photo: failed to read frame from center_camera")
         return False, None
@@ -669,7 +688,7 @@ def capture_patient_photo(center_camera):
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     milliseconds = int((time.time() % 1.0) * 1000)
     photo_path = os.path.join(PATIENT_PHOTO_DIR, f"patient_photo_{timestamp}_{milliseconds:03d}.jpg")
-    photo_written = cv2.imwrite(photo_path, center_frame)
+    photo_written = cv2.imwrite(photo_path, photo_frame)
     if not photo_written:
         print(f"capture_patient_photo: failed to write photo to {photo_path}")
         return False, None
@@ -717,26 +736,17 @@ def main():
         center_camera.release()
         center_camera = None
 
-    # Create ADC object and channels
-    i2c = busio.I2C(board.SCL, board.SDA)
-    ads = ADS1115(i2c)
-    ads.gain = 1
-
-    adc_channels = {
-        "A0": AnalogIn(ads, ads1x15.Pin.A0),
-        "A1": AnalogIn(ads, ads1x15.Pin.A1),
-        "A2": AnalogIn(ads, ads1x15.Pin.A2),
-        "A3": AnalogIn(ads, ads1x15.Pin.A3),
-    }
+    adc_channels = init_adc_channels()
 
     current_light_mode = LIGHT_OFF_MODE
     previous_light_mode = None
-    previous_light_mode = update_camera_profile_from_light_mode(
-        face_track_cam,
-        current_light_mode,
-        previous_light_mode,
-        CAMERA_PROFILE_DIR
-    )
+    if adc_channels is not None:
+        previous_light_mode = update_camera_profile_from_light_mode(
+            face_track_cam,
+            current_light_mode,
+            previous_light_mode,
+            CAMERA_PROFILE_DIR
+        )
 
     # Set the max number of stored frames allowed
     face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
@@ -783,6 +793,7 @@ def main():
     pending_range = None
     pending_count = 0
     stable_scalar = STABLE_SCALAR_DEFAULT
+    motors_enabled = False
 
     # Start gesture control in the locked state, equivalent to beginning with a fist.
     gesture_mode = GESTURE_LOCKED
@@ -798,338 +809,359 @@ def main():
     photo_trigger_armed = True
 
     # ======= Main Loop =======
-    while True:
-        yaw_dps = 0.0
-        pitch_dps = 0.0
-        roll_dps = 0.0
-
-        frame_read, frame = face_track_cam.read()
-        if not frame_read:
-            # Note: log_file is only set if file open succeeded above
-            try:
-                log_file.write(f"main: frame grab failed\n")
-            except Exception:
-                pass
-            break
-
-        current_time = time.time()
-        frame_height, frame_width = frame.shape[:2]
-
-        # Update camera profile from ADC light mode every loop
-        current_light_mode, light_mode_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
-        previous_light_mode = update_camera_profile_from_light_mode(
-            face_track_cam,
-            current_light_mode,
-            previous_light_mode,
-            CAMERA_PROFILE_DIR
-        )
-
-        if anchor is None:
-            anchor = (frame_width / 2.0, frame_height / 2.0)
-
-        # Normal tracking mode
-        # get the capture from camera
-        rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # process the image and set landmarks
-        processed_image = face_mesh.process(rgb_frame_cap)
-        hand_results = hands.process(rgb_frame_cap)
-
-        pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected = detect_hand_gestures(
-            hand_results,
-            frame_width,
-            frame_height
-        )
-
-        if not two_detected:
-            two_counter = 0
-            photo_trigger_armed = True
-
-        if photo_countdown_active:
-            # Hold the head still while counting down; this avoids blocking the rest of the loop.
-            last_send_time = send_zero_if_due(current_time, last_send_time)
-
-            elapsed_photo_time = current_time - photo_countdown_start
-            remaining_photo_time = max(0.0, PHOTO_COUNTDOWN_SEC - elapsed_photo_time)
-
-            if elapsed_photo_time >= PHOTO_COUNTDOWN_SEC:
-                photo_ok, photo_path = capture_patient_photo(center_camera)
-                photo_countdown_active = False
-                gesture_mode = photo_return_mode
-                prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
-            draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
-            if show_runtime_frame(
-                window_name,
-                frame,
-                [
-                    ("gesture:PHOTO_COUNTDOWN", (10, 24), (0, 255, 255), 0.55),
-                    (f"Taking photo in {remaining_photo_time:.1f}s", (10, 48), (0, 255, 255), 0.55),
-                    (f"light_mode:{current_light_mode}", (10, 72), (255, 255, 255), 0.55),
-                ],
-            ):
-                break
-            if photo_countdown_active:
-                continue
-
-        if photo_trigger_armed and two_detected:
-            two_counter += 1
-            if two_counter >= TWO_ENTER_FRAMES:
-                # Remember the current tracking mode so we can resume it after the photo is taken.
-                photo_countdown_active = True
-                photo_countdown_start = current_time
-                photo_return_mode = gesture_mode
-                photo_trigger_armed = False
-                two_counter = 0
-                prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
-                continue
-
-        gesture_mode, pinch_counter, four_counter, fist_counter, pinch_point, reset_state = update_gesture_mode(
-            gesture_mode,
-            pinch_detected,
-            index_tip_point,
-            four_detected,
-            fist_detected,
-            pinch_counter,
-            four_counter,
-            fist_counter,
-            pinch_point,
-            SEEKING,
-            LOCKED
-        )
-        if reset_state is not None:
-            prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(reset_state)
-
-        centroid, eye_dist_px = get_mouth_centroid_and_eye_dist(processed_image, frame_width, frame_height)
-
-        if gesture_mode == GESTURE_TRACK_PINCH and pinch_point is not None:
-            centroid = pinch_point
-
-        if gesture_mode == GESTURE_LOCKED:
-            last_send_time = send_zero_if_due(current_time, last_send_time)
-
-            draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
-            if show_runtime_frame(
-                window_name,
-                frame,
-                [
-                    ("gesture:LOCKED", (10, 24), (0, 255, 255), 0.55),
-                    ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
-                    ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
-                    (f"light_mode:{current_light_mode}", (10, 96), (255, 255, 255), 0.55),
-                ],
-            ):
-                break
-            continue
-
-        # Handle if no centroid was found
-        if centroid is None:
-            consecutive_lost_frames += 1
-            # if we lose tracking hold
-            last_send_time = send_zero_if_due(current_time, last_send_time)
-
-            # Check how many consecutive_lost_frames frames we have
-            if consecutive_lost_frames > MAX_LOST_FRAMES:
-                prev_smoothed = None
-                prev_time = None
-
-            draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
-            if show_runtime_frame(
-                window_name,
-                frame,
-                [
-                    (f"light_mode:{current_light_mode}", (10, 24), (255, 255, 255), 0.55),
-                ],
-            ):
-                break
-            # Go back to top of while loop
-            continue
-
-        # Reset consecutive_lost_frames and smoothed if we got face points
-        consecutive_lost_frames = 0
-        point_alpha = FINGER_SMOOTH_ALPHA if gesture_mode == GESTURE_TRACK_PINCH else SMOOTH_ALPHA
-        smoothed = ema_point(centroid, prev_smoothed, point_alpha)
-
-        if prev_time is None:
-            prev_time = current_time
-        # ensure the change in time is non-zero
-        delta_time = max(1e-6, current_time - prev_time)
-
-        # Find the angular change between frames and convert to speed in deg/s
-        if prev_smoothed is None:
-            speed = 0.0
-        else:
-            pixal_displacement_x = smoothed[0] - prev_smoothed[0]
-            pixal_displacement_y = smoothed[1] - prev_smoothed[1]
-            # Get displacement in x and y in degrees
-            dvx, dvy = pixels_to_deg(pixal_displacement_x, pixal_displacement_y, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
-            # Convert the displacement into speed
-            speed = math.hypot(dvx, dvy) / delta_time
-
-        # Set timing and smoothed the previous values for next loop
-        prev_time = current_time
-        prev_smoothed = smoothed
-
-        # Update stable box scalar using discrete ranges + debounce
-        desired_range = range_from_eye_dist(eye_dist_px)
-        stable_range, pending_range, pending_count, stable_scalar = update_stable_range_state(
-            desired_range,
-            stable_range,
-            pending_range,
-            pending_count
-        )
-
-        current_stable_scalar = stable_scalar
-        current_stop_threshold = STABLE_STOP_SEEKING_THRESHOLD
-
-        if gesture_mode == GESTURE_TRACK_PINCH:
-            current_stable_scalar *= FINGER_STABLE_SCALAR_MULT
-            current_stop_threshold = FINGER_STOP_SEEKING_THRESHOLD
-
-        # Build our stable box (dynamic scalar)
-        stable_box = build_stable_box(anchor, frame_width, frame_height, current_stable_scalar)
-        # Determine if we are in the stable region
-        in_stable_region = inside_box(smoothed, stable_box)
-
-        # Offset of centroid from center of frame
-        dx_center = smoothed[0] - anchor[0]
-        dy_center = smoothed[1] - anchor[1]
-
-        # Normalizes the offset error
-        norm_dx = dx_center / (frame_width / 2.0)
-        norm_dy = dy_center / (frame_height / 2.0)
-        # Find radial distance from center
-        radial_norm = math.hypot(norm_dx, norm_dy)
-        # Check if we are close enough to stop
-        within_stop_threshold = (radial_norm <= current_stop_threshold)
-
-        ### Compute Jitter using timed histogram to set too_wild var (may be able to be removed) ###
-
-        # Add values to the histogram
-        pos_x.add(current_time, smoothed[0])
-        pos_y.add(current_time, smoothed[1])
-        vel_h.add(current_time, speed)
-
-        xs, ys = pos_x.values(), pos_y.values()
-        pos_std = 999.0
-        if len(xs) >= 6 and len(ys) >= 6:
-            pos_std = 0.5 * (statistics.pstdev(xs) + statistics.pstdev(ys))
-        speeds = vel_h.values()
-        vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
-
-        # If this is 1, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
-        too_wild = (vel_med > VEL_THRESH_DEG_S * 1000.0) or (pos_std > POS_STD_THRESH_PX * 1000.0)
-
-        ###                                                                                      ###
-
-        # Set States
-        if state == LOCKED:
-            if not in_stable_region:
-                state = SEEKING
-        else:
-            if within_stop_threshold:
-                state = LOCKED
-
-        # Comput the speed commands to send
-        if state == SEEKING and not too_wild:
-            err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
-            err_yaw_deg *= AXIS_SIGN["yaw"]
-            err_pitch_deg *= AXIS_SIGN["pitch"]
-
-            deadband_yaw = FINGER_DEADBAND_DEG_YAW if gesture_mode == GESTURE_TRACK_PINCH else DEADBAND_DEG_YAW
-            deadband_pitch = FINGER_DEADBAND_DEG_PITCH if gesture_mode == GESTURE_TRACK_PINCH else DEADBAND_DEG_PITCH
-
-            # Deadband
-            if abs(err_yaw_deg) < deadband_yaw:
-                err_yaw_deg = 0.0
-            if abs(err_pitch_deg) < deadband_pitch:
-                err_pitch_deg = 0.0
-
-            kp_yaw = FINGER_KP_YAW_DPS_PER_DEG if gesture_mode == GESTURE_TRACK_PINCH else KP_YAW_DPS_PER_DEG
-            kp_pitch = FINGER_KP_PITCH_DPS_PER_DEG if gesture_mode == GESTURE_TRACK_PINCH else KP_PITCH_DPS_PER_DEG
-
-            yaw_dps = clamp(kp_yaw * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
-            pitch_dps = clamp(kp_pitch * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
-            roll_dps = 0.0  # keep roll off unless you want it
-
-        else:
-            # LOCKED or too_wild so hold and do nothing
+    try:
+        while True:
             yaw_dps = 0.0
             pitch_dps = 0.0
             roll_dps = 0.0
 
-        # smooth and send the speeds to the controller
-        sent = 0
-        # Check if enough time has passed since last send
-        if (current_time - last_send_time) >= COMMAND_PERIOD:
-            cmd_alpha = FINGER_CMD_SPEED_EMA_ALPHA if gesture_mode == GESTURE_TRACK_PINCH else CMD_SPEED_EMA_ALPHA
-
-            smooth_yaw_dps = ema_scalar(yaw_dps, smooth_yaw_dps, cmd_alpha)
-            smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, cmd_alpha)
-            smooth_roll_dps = ema_scalar(roll_dps, smooth_roll_dps, cmd_alpha)
-
-            ok_send = send_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
-            if ok_send:
-                last_send_time = current_time
-                sent = 1
-
-        # Only print telemetry if desired
-        if PRINT_TELEMETRY:
-            eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-            print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
-
-        # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
-        if DRAW_FRAME_RT:
-            l, t_, r, b = map(int, stable_box)
-            cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
-            cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
-                           cv2.MARKER_CROSS, 12, 2)
-            cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
-
-            draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
-
-            if pinch_point is not None and gesture_mode == GESTURE_TRACK_PINCH:
-                cv2.circle(frame, (int(pinch_point[0]), int(pinch_point[1])), 8, (255, 0, 255), -1)
-
-            eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
-            state_txt = "LOCKED" if state == LOCKED else "SEEKING"
-            gesture_txt = "MOUTH"
-            if gesture_mode == GESTURE_TRACK_PINCH:
-                gesture_txt = "INDEX_TIP"
-            elif gesture_mode == GESTURE_LOCKED:
-                gesture_txt = "LOCKED"
-
-            if show_runtime_frame(
-                window_name,
-                frame,
-                [
-                    (f"state:{state_txt}", (10, 24), (40, 220, 40), 0.55),
-                    (f"Radial distance = {radial_norm:.3f}", (10, 48), (40, 220, 40), 0.55),
-                    (f"eye_px={eye_str} box={current_stable_scalar:.3f} {stable_range}", (10, 72), (40, 220, 40), 0.55),
-                    (f"light_mode:{current_light_mode}", (10, 96), (255, 255, 255), 0.55),
-                    (f"gesture:{gesture_txt}", (10, 120), (255, 255, 255), 0.55),
-                    ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 144), (255, 255, 255), 0.55),
-                    ("Two -> 2s countdown then center photo", (10, 168), (255, 255, 255), 0.55),
-                ],
-            ):
+            frame_read, frame = face_track_cam.read()
+            if not frame_read:
+                # Note: log_file is only set if file open succeeded above
+                try:
+                    log_file.write("main: frame grab failed\n")
+                except Exception:
+                    pass
                 break
 
-    # stop motion on exit
-    try:
-        # Send a hold command to the motors
-        send_speeds(0.0, 0.0, 0.0)
-        # Stop motors on end of program
-        set_motors(0)
-    except Exception:
-        pass
+            current_time = time.time()
+            frame_height, frame_width = frame.shape[:2]
 
-    hands.close()
-    face_mesh.close()
-    face_track_cam.release()
-    if center_camera is not None:
-        center_camera.release()
-    cv2.destroyAllWindows()
+            if not motors_enabled:
+                set_motors(1)
+                motors_enabled = True
 
-    print("Stopped.")
+            # Update camera profile from ADC light mode every loop
+            if adc_channels is not None:
+                read_mode, read_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
+                if read_mode is None:
+                    adc_channels = None
+                    current_light_mode = LIGHT_OFF_MODE
+                    light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
+                else:
+                    current_light_mode = read_mode
+                    light_mode_voltages = read_voltages
+                    previous_light_mode = update_camera_profile_from_light_mode(
+                        face_track_cam,
+                        current_light_mode,
+                        previous_light_mode,
+                        CAMERA_PROFILE_DIR
+                    )
+            else:
+                current_light_mode = LIGHT_OFF_MODE
+                light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
+
+            if anchor is None:
+                anchor = (frame_width / 2.0, frame_height / 2.0)
+
+            # Normal tracking mode
+            # get the capture from camera
+            rgb_frame_cap = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # process the image and set landmarks
+            processed_image = face_mesh.process(rgb_frame_cap)
+            hand_results = hands.process(rgb_frame_cap)
+
+            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, fist_detected = detect_hand_gestures(
+                hand_results,
+                frame_width,
+                frame_height
+            )
+
+            if not two_detected:
+                two_counter = 0
+                photo_trigger_armed = True
+
+            if photo_countdown_active:
+                # Hold the head still while counting down; this avoids blocking the rest of the loop.
+                last_send_time = send_zero_if_due(current_time, last_send_time)
+
+                elapsed_photo_time = current_time - photo_countdown_start
+                remaining_photo_time = max(0.0, PHOTO_COUNTDOWN_SEC - elapsed_photo_time)
+
+                if elapsed_photo_time >= PHOTO_COUNTDOWN_SEC:
+                    photo_ok, photo_path = capture_patient_photo(center_camera)
+                    photo_countdown_active = False
+                    gesture_mode = photo_return_mode
+                    prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+                if show_runtime_frame(
+                    window_name,
+                    frame,
+                    [
+                        ("gesture:PHOTO_COUNTDOWN", (10, 24), (0, 255, 255), 0.55),
+                        (f"Taking photo in {remaining_photo_time:.1f}s", (10, 48), (0, 255, 255), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 72), (255, 255, 255), 0.55),
+                    ],
+                ):
+                    break
+                if photo_countdown_active:
+                    continue
+
+            if photo_trigger_armed and two_detected:
+                two_counter += 1
+                if two_counter >= TWO_ENTER_FRAMES:
+                    # Remember the current tracking mode so we can resume it after the photo is taken.
+                    photo_countdown_active = True
+                    photo_countdown_start = current_time
+                    photo_return_mode = gesture_mode
+                    photo_trigger_armed = False
+                    two_counter = 0
+                    prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
+                    continue
+
+            gesture_mode, pinch_counter, four_counter, fist_counter, pinch_point, reset_state = update_gesture_mode(
+                gesture_mode,
+                pinch_detected,
+                index_tip_point,
+                four_detected,
+                fist_detected,
+                pinch_counter,
+                four_counter,
+                fist_counter,
+                pinch_point,
+                SEEKING,
+                LOCKED
+            )
+            if reset_state is not None:
+                prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(reset_state)
+
+            centroid, eye_dist_px = get_mouth_centroid_and_eye_dist(processed_image, frame_width, frame_height)
+
+            if gesture_mode == GESTURE_TRACK_PINCH and pinch_point is not None:
+                centroid = pinch_point
+
+            if gesture_mode == GESTURE_LOCKED:
+                last_send_time = send_zero_if_due(current_time, last_send_time)
+
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+                if show_runtime_frame(
+                    window_name,
+                    frame,
+                    [
+                        ("gesture:LOCKED", (10, 24), (0, 255, 255), 0.55),
+                        ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
+                        ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 96), (255, 255, 255), 0.55),
+                    ],
+                ):
+                    break
+                continue
+
+            # Handle if no centroid was found
+            if centroid is None:
+                consecutive_lost_frames += 1
+                # if we lose tracking hold
+                last_send_time = send_zero_if_due(current_time, last_send_time)
+
+                # Check how many consecutive_lost_frames frames we have
+                if consecutive_lost_frames > MAX_LOST_FRAMES:
+                    prev_smoothed = None
+                    prev_time = None
+
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+                if show_runtime_frame(
+                    window_name,
+                    frame,
+                    [
+                        (f"light_mode:{current_light_mode}", (10, 24), (255, 255, 255), 0.55),
+                    ],
+                ):
+                    break
+                # Go back to top of while loop
+                continue
+
+            # Reset consecutive_lost_frames and smoothed if we got face points
+            consecutive_lost_frames = 0
+            point_alpha = FINGER_SMOOTH_ALPHA if gesture_mode == GESTURE_TRACK_PINCH else SMOOTH_ALPHA
+            smoothed = ema_point(centroid, prev_smoothed, point_alpha)
+
+            if prev_time is None:
+                prev_time = current_time
+            # ensure the change in time is non-zero
+            delta_time = max(1e-6, current_time - prev_time)
+
+            # Find the angular change between frames and convert to speed in deg/s
+            if prev_smoothed is None:
+                speed = 0.0
+            else:
+                pixal_displacement_x = smoothed[0] - prev_smoothed[0]
+                pixal_displacement_y = smoothed[1] - prev_smoothed[1]
+                # Get displacement in x and y in degrees
+                dvx, dvy = pixels_to_deg(pixal_displacement_x, pixal_displacement_y, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
+                # Convert the displacement into speed
+                speed = math.hypot(dvx, dvy) / delta_time
+
+            # Set timing and smoothed the previous values for next loop
+            prev_time = current_time
+            prev_smoothed = smoothed
+
+            # Update stable box scalar using discrete ranges + debounce
+            desired_range = range_from_eye_dist(eye_dist_px)
+            stable_range, pending_range, pending_count, stable_scalar = update_stable_range_state(
+                desired_range,
+                stable_range,
+                pending_range,
+                pending_count
+            )
+
+            current_stable_scalar = stable_scalar
+            current_stop_threshold = STABLE_STOP_SEEKING_THRESHOLD
+
+            if gesture_mode == GESTURE_TRACK_PINCH:
+                current_stable_scalar *= FINGER_STABLE_SCALAR_MULT
+                current_stop_threshold = FINGER_STOP_SEEKING_THRESHOLD
+
+            # Build our stable box (dynamic scalar)
+            stable_box = build_stable_box(anchor, frame_width, frame_height, current_stable_scalar)
+            # Determine if we are in the stable region
+            in_stable_region = inside_box(smoothed, stable_box)
+
+            # Offset of centroid from center of frame
+            dx_center = smoothed[0] - anchor[0]
+            dy_center = smoothed[1] - anchor[1]
+
+            # Normalizes the offset error
+            norm_dx = dx_center / (frame_width / 2.0)
+            norm_dy = dy_center / (frame_height / 2.0)
+            # Find radial distance from center
+            radial_norm = math.hypot(norm_dx, norm_dy)
+            # Check if we are close enough to stop
+            within_stop_threshold = (radial_norm <= current_stop_threshold)
+
+            ### Compute Jitter using timed histogram to set too_wild var (may be able to be removed) ###
+
+            # Add values to the histogram
+            pos_x.add(current_time, smoothed[0])
+            pos_y.add(current_time, smoothed[1])
+            vel_h.add(current_time, speed)
+
+            xs, ys = pos_x.values(), pos_y.values()
+            pos_std = 999.0
+            if len(xs) >= 6 and len(ys) >= 6:
+                pos_std = 0.5 * (statistics.pstdev(xs) + statistics.pstdev(ys))
+            speeds = vel_h.values()
+            vel_med = statistics.median(speeds) if len(speeds) >= 3 else 999.0
+
+            # If this is 1, the gimbal will not move and is in place as a precaution to stop the gimbal from chasing error
+            too_wild = (vel_med > VEL_THRESH_DEG_S * 1000.0) or (pos_std > POS_STD_THRESH_PX * 1000.0)
+
+            ###                                                                                      ###
+
+            # Set States
+            if state == LOCKED:
+                if not in_stable_region:
+                    state = SEEKING
+            else:
+                if within_stop_threshold:
+                    state = LOCKED
+
+            # Comput the speed commands to send
+            if state == SEEKING and not too_wild:
+                err_yaw_deg, err_pitch_deg = pixels_to_deg(dx_center, dy_center, frame_width, frame_height, FOV_H_DEG, FOV_V_DEG)
+                err_yaw_deg *= AXIS_SIGN["yaw"]
+                err_pitch_deg *= AXIS_SIGN["pitch"]
+
+                deadband_yaw = FINGER_DEADBAND_DEG_YAW if gesture_mode == GESTURE_TRACK_PINCH else DEADBAND_DEG_YAW
+                deadband_pitch = FINGER_DEADBAND_DEG_PITCH if gesture_mode == GESTURE_TRACK_PINCH else DEADBAND_DEG_PITCH
+
+                # Deadband
+                if abs(err_yaw_deg) < deadband_yaw:
+                    err_yaw_deg = 0.0
+                if abs(err_pitch_deg) < deadband_pitch:
+                    err_pitch_deg = 0.0
+
+                kp_yaw = FINGER_KP_YAW_DPS_PER_DEG if gesture_mode == GESTURE_TRACK_PINCH else KP_YAW_DPS_PER_DEG
+                kp_pitch = FINGER_KP_PITCH_DPS_PER_DEG if gesture_mode == GESTURE_TRACK_PINCH else KP_PITCH_DPS_PER_DEG
+
+                yaw_dps = clamp(kp_yaw * err_yaw_deg, -MAX_DPS_YAW, +MAX_DPS_YAW)
+                pitch_dps = clamp(kp_pitch * err_pitch_deg, -MAX_DPS_PITCH, +MAX_DPS_PITCH)
+                roll_dps = 0.0  # keep roll off unless you want it
+
+            else:
+                # LOCKED or too_wild so hold and do nothing
+                yaw_dps = 0.0
+                pitch_dps = 0.0
+                roll_dps = 0.0
+
+            # smooth and send the speeds to the controller
+            sent = 0
+            # Check if enough time has passed since last send
+            if (current_time - last_send_time) >= COMMAND_PERIOD:
+                cmd_alpha = FINGER_CMD_SPEED_EMA_ALPHA if gesture_mode == GESTURE_TRACK_PINCH else CMD_SPEED_EMA_ALPHA
+
+                smooth_yaw_dps = ema_scalar(yaw_dps, smooth_yaw_dps, cmd_alpha)
+                smooth_pitch_dps = ema_scalar(pitch_dps, smooth_pitch_dps, cmd_alpha)
+                smooth_roll_dps = ema_scalar(roll_dps, smooth_roll_dps, cmd_alpha)
+
+                ok_send = send_speeds(smooth_roll_dps, smooth_pitch_dps, smooth_yaw_dps)
+                if ok_send:
+                    last_send_time = current_time
+                    sent = 1
+
+            # Only print telemetry if desired
+            if PRINT_TELEMETRY:
+                eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
+                print(f"{current_time - initial_time:.3f} {yaw_dps:+.2f} {pitch_dps:+.2f} {sent} {state} r={radial_norm:.3f} eye={eye_str} box={current_stable_scalar:.3f} {stable_range} light_mode={current_light_mode} A0={light_mode_voltages[0]:.3f} A1={light_mode_voltages[1]:.3f} A2={light_mode_voltages[2]:.3f} A3={light_mode_voltages[3]:.3f}")
+
+            # This draws out the frame for seeing the tracking in real time and has no effect on the algorithm
+            if DRAW_FRAME_RT:
+                l, t_, r, b = map(int, stable_box)
+                cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
+                cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
+                               cv2.MARKER_CROSS, 12, 2)
+                cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
+
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+
+                if pinch_point is not None and gesture_mode == GESTURE_TRACK_PINCH:
+                    cv2.circle(frame, (int(pinch_point[0]), int(pinch_point[1])), 8, (255, 0, 255), -1)
+
+                eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
+                state_txt = "LOCKED" if state == LOCKED else "SEEKING"
+                gesture_txt = "MOUTH"
+                if gesture_mode == GESTURE_TRACK_PINCH:
+                    gesture_txt = "INDEX_TIP"
+                elif gesture_mode == GESTURE_LOCKED:
+                    gesture_txt = "LOCKED"
+
+                if show_runtime_frame(
+                    window_name,
+                    frame,
+                    [
+                        (f"state:{state_txt}", (10, 24), (40, 220, 40), 0.55),
+                        (f"Radial distance = {radial_norm:.3f}", (10, 48), (40, 220, 40), 0.55),
+                        (f"eye_px={eye_str} box={current_stable_scalar:.3f} {stable_range}", (10, 72), (40, 220, 40), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 96), (255, 255, 255), 0.55),
+                        (f"gesture:{gesture_txt}", (10, 120), (255, 255, 255), 0.55),
+                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 144), (255, 255, 255), 0.55),
+                        ("Two -> 2s countdown then center photo", (10, 168), (255, 255, 255), 0.55),
+                    ],
+                ):
+                    break
+
+    finally:
+        # stop motion on exit
+        try:
+            # Send a hold command to the motors
+            send_speeds(0.0, 0.0, 0.0)
+            # Stop motors on end of program
+            set_motors(0)
+        except Exception:
+            pass
+
+        hands.close()
+        face_mesh.close()
+        face_track_cam.release()
+        if center_camera is not None:
+            center_camera.release()
+        cv2.destroyAllWindows()
+
+        print("Stopped.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as main_error:
+        print(f"Fatal error: {main_error}")
+        raise
