@@ -148,9 +148,9 @@ STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
 # slightly left/right of the true light center compared with the stronger
 # vertical offset from being mounted above it.
 ANCHOR_X_OFFSET_PX = -10.0
-ANCHOR_Y_OFFSET_FAR_PX = 20.0
-ANCHOR_Y_OFFSET_MID_PX = 38.0
-ANCHOR_Y_OFFSET_NEAR_PX = 58.0
+ANCHOR_Y_OFFSET_FAR_PX = 14.0
+ANCHOR_Y_OFFSET_MID_PX = 30.0
+ANCHOR_Y_OFFSET_NEAR_PX = 50.0
 
 # Prevent flicker: require N consecutive frames to accept a new range
 RANGE_SWITCH_FRAMES = 8
@@ -166,12 +166,20 @@ LOWEST_LIGHT_MODE  = "LOWEST_LIGHT"
 MEDIUM_LIGHT_MODE  = "MEDIUM_LIGHT"
 HIGHEST_LIGHT_MODE = "HIGHEST_LIGHT"
 
-LIGHT_MODE_TO_PROFILE = {
+FACE_TRACK_LIGHT_MODE_TO_PROFILE = {
     HIGHEST_LIGHT_MODE: "wide_angle_full_light_on.json",
     MEDIUM_LIGHT_MODE:  "wide_angle_medium_light_on.json",
     LOWEST_LIGHT_MODE:  "wide_angle_low_light_on.json",
     YELLOW_LIGHT_MODE:  "wide_angle_yellow_light_on.json",
     LIGHT_OFF_MODE:     "wide_angle_light_off.json",
+}
+
+CENTER_CAM_LIGHT_MODE_TO_PROFILE = {
+    LIGHT_OFF_MODE: "zoom_loff.json",
+    YELLOW_LIGHT_MODE: "zoom_lon.json",
+    LOWEST_LIGHT_MODE: "zoom_lon.json",
+    MEDIUM_LIGHT_MODE: "zoom_lon.json",
+    HIGHEST_LIGHT_MODE: "zoom_lon.json",
 }
 
 GESTURE_TRACK_MOUTH = 0
@@ -380,11 +388,11 @@ def read_light_mode(adc_channels, off_threshold_volts):
     selected_mode = max(active_modes, key=active_modes.get)
     return selected_mode, (v0, v1, v2, v3)
 
-def update_camera_profile_from_light_mode(camera, current_light_mode, previous_light_mode, profile_dir):
+def update_camera_profile_from_light_mode(camera, current_light_mode, previous_light_mode, profile_dir, profile_map):
     if current_light_mode == previous_light_mode:
         return previous_light_mode
 
-    profile_filename = LIGHT_MODE_TO_PROFILE.get(current_light_mode)
+    profile_filename = profile_map.get(current_light_mode)
     if profile_filename is None:
         print(f"Warning: No profile mapped for light mode {current_light_mode}")
         return previous_light_mode
@@ -1078,13 +1086,22 @@ def main():
     adc_channels = init_adc_channels()
 
     current_light_mode = LIGHT_OFF_MODE
-    previous_light_mode = None
+    previous_face_track_light_mode = None
+    previous_center_light_mode = None
     if adc_channels is not None:
-        previous_light_mode = update_camera_profile_from_light_mode(
+        previous_face_track_light_mode = update_camera_profile_from_light_mode(
             face_track_cam,
             current_light_mode,
-            previous_light_mode,
-            CAMERA_PROFILE_DIR
+            previous_face_track_light_mode,
+            CAMERA_PROFILE_DIR,
+            FACE_TRACK_LIGHT_MODE_TO_PROFILE
+        )
+        previous_center_light_mode = update_camera_profile_from_light_mode(
+            center_cam,
+            current_light_mode,
+            previous_center_light_mode,
+            CAMERA_PROFILE_DIR,
+            CENTER_CAM_LIGHT_MODE_TO_PROFILE
         )
 
     # Set the max number of stored frames allowed
@@ -1183,11 +1200,19 @@ def main():
                 else:
                     current_light_mode = read_mode
                     light_mode_voltages = read_voltages
-                    previous_light_mode = update_camera_profile_from_light_mode(
+                    previous_face_track_light_mode = update_camera_profile_from_light_mode(
                         face_track_cam,
                         current_light_mode,
-                        previous_light_mode,
-                        CAMERA_PROFILE_DIR
+                        previous_face_track_light_mode,
+                        CAMERA_PROFILE_DIR,
+                        FACE_TRACK_LIGHT_MODE_TO_PROFILE
+                    )
+                    previous_center_light_mode = update_camera_profile_from_light_mode(
+                        center_cam,
+                        current_light_mode,
+                        previous_center_light_mode,
+                        CAMERA_PROFILE_DIR,
+                        CENTER_CAM_LIGHT_MODE_TO_PROFILE
                     )
             else:
                 current_light_mode = LIGHT_OFF_MODE
