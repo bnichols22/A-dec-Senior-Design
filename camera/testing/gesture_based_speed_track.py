@@ -22,7 +22,7 @@
 #     - bgc_set_motors(on_off)   (0=off, 1=on)
 # ==============================================================
 
-import os, sys, time, math, warnings, statistics, ctypes
+import os, sys, time, math, warnings, statistics, ctypes, threading, subprocess, wave, shutil
 import cv2
 import mediapipe as mp
 from collections import deque
@@ -30,6 +30,11 @@ import json
 import board
 import busio
 from adafruit_ads1x15 import ADS1115, AnalogIn, ads1x15
+
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
 
 # --------- Paths and Filename ----------
 file_name = "gesture_based_speed_track.py"
@@ -48,6 +53,8 @@ CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
 # center-camera cable is currently broken.
 PATIENT_PHOTO_DIR = os.path.join(BASE_DIR, "patient_photo")
 os.makedirs(PATIENT_PHOTO_DIR, exist_ok=True)
+AV_RECORD_DIR = os.path.join(BASE_DIR, "av_recordings")
+os.makedirs(AV_RECORD_DIR, exist_ok=True)
 
 # --------- Vision / tracker config ----------
 # WIDE_ANGLE_CAM_INDEX = 2  # Original dedicated face-tracking camera.
@@ -182,6 +189,11 @@ TWO_FISTS_ENTER_FRAMES = 4
 THUMBS_UP_HEIGHT_RATIO = 0.25
 THUMBS_UP_CLEARANCE_RATIO = 0.10
 MOTOR_GESTURE_COOLDOWN_SEC = 1.0
+THREE_ENTER_FRAMES = 4
+THREE_FIST_ENTER_FRAMES = 4
+RECORDING_FPS_FALLBACK = 20.0
+RECORDING_AUDIO_RATE = 44100
+RECORDING_AUDIO_CHANNELS = 1
 
 FINGER_SMOOTH_ALPHA = 0.45
 FINGER_CMD_SPEED_EMA_ALPHA = 0.55
@@ -381,20 +393,203 @@ def landmark_to_pixel(landmark, frame_width, frame_height):
 def finger_extended(tip_point, pip_point):
     return tip_point[1] < pip_point[1]
 
+class AudioRecorder:
+
+    def __init__(self, audio_filename):
+        self.audio_filename = audio_filename
+        self.open = False
+        self.rate = RECORDING_AUDIO_RATE
+        self.frames_per_buffer = 1024
+        self.channels = RECORDING_AUDIO_CHANNELS
+        self.format = pyaudio.paInt16 if pyaudio is not None else None
+        self.audio = None
+        self.stream = None
+        self.audio_frames = []
+        self.audio_thread = None
+
+    def start(self):
+        if pyaudio is None:
+            raise RuntimeError("PyAudio is not installed; audio recording is unavailable.")
+
+        self.audio = pyaudio.PyAudio()
+        self.stream = self.audio.open(
+            format=self.format,
+            channels=self.channels,
+            rate=self.rate,
+            input=True,
+            frames_per_buffer=self.frames_per_buffer,
+        )
+        self.open = True
+        self.audio_thread = threading.Thread(target=self.record, daemon=True)
+        self.audio_thread.start()
+
+    def record(self):
+        self.stream.start_stream()
+        while self.open:
+            data = self.stream.read(self.frames_per_buffer, exception_on_overflow=False)
+            self.audio_frames.append(data)
+
+    def stop(self):
+        if not self.open:
+            return
+
+        self.open = False
+        if self.audio_thread is not None:
+            self.audio_thread.join(timeout=2.0)
+
+        if self.stream is not None:
+            self.stream.stop_stream()
+            self.stream.close()
+        if self.audio is not None:
+            sample_width = self.audio.get_sample_size(self.format)
+            self.audio.terminate()
+        else:
+            sample_width = 2
+
+        wave_file = wave.open(self.audio_filename, "wb")
+        wave_file.setnchannels(self.channels)
+        wave_file.setsampwidth(sample_width)
+        wave_file.setframerate(self.rate)
+        wave_file.writeframes(b"".join(self.audio_frames))
+        wave_file.close()
+
+class AVRecorder:
+
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        self.active = False
+        self.video_out = None
+        self.audio_recorder = None
+        self.base_name = None
+        self.video_path = None
+        self.audio_path = None
+        self.muxed_path = None
+        self.transcript_path = None
+        self.status_message = "idle"
+
+    def start(self, frame_width, frame_height, fps):
+        if self.active:
+            return False, "recording already active"
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.base_name = f"av_recording_{timestamp}"
+        self.video_path = os.path.join(self.output_dir, f"{self.base_name}_video.avi")
+        self.audio_path = os.path.join(self.output_dir, f"{self.base_name}_audio.wav")
+        self.muxed_path = os.path.join(self.output_dir, f"{self.base_name}.avi")
+        self.transcript_path = os.path.join(self.output_dir, f"{self.base_name}_transcript.txt")
+
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        recording_fps = fps if fps and fps > 0 else RECORDING_FPS_FALLBACK
+        self.video_out = cv2.VideoWriter(self.video_path, fourcc, recording_fps, (frame_width, frame_height))
+        if not self.video_out.isOpened():
+            self.video_out = None
+            self.status_message = "video writer failed to open"
+            return False, self.status_message
+
+        try:
+            self.audio_recorder = AudioRecorder(self.audio_path)
+            self.audio_recorder.start()
+        except Exception as audio_error:
+            self.video_out.release()
+            self.video_out = None
+            self.audio_recorder = None
+            self.status_message = f"audio start failed: {audio_error}"
+            return False, self.status_message
+
+        self.active = True
+        self.status_message = f"recording {self.base_name}"
+        print(f"Started AV recording: {self.base_name}")
+        return True, self.status_message
+
+    def write_frame(self, frame):
+        if self.active and self.video_out is not None:
+            self.video_out.write(frame)
+
+    def stop(self):
+        if not self.active:
+            return False, "recording not active"
+
+        self.active = False
+
+        if self.video_out is not None:
+            self.video_out.release()
+            self.video_out = None
+
+        if self.audio_recorder is not None:
+            self.audio_recorder.stop()
+            self.audio_recorder = None
+
+        mux_ok, mux_message = self._mux_audio_video()
+        transcript_ok, transcript_message = self._generate_transcript()
+
+        message_parts = [mux_message]
+        if transcript_message:
+            message_parts.append(transcript_message)
+        self.status_message = " | ".join(part for part in message_parts if part)
+        print(f"Stopped AV recording: {self.status_message}")
+        return mux_ok, self.status_message
+
+    def _mux_audio_video(self):
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path is None:
+            return False, "ffmpeg not found; saved separate audio/video files"
+
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-i", self.audio_path,
+            "-i", self.video_path,
+            "-c:v", "copy",
+            "-c:a", "pcm_s16le",
+            self.muxed_path,
+        ]
+        mux_result = subprocess.run(cmd, capture_output=True, text=True)
+        if mux_result.returncode != 0:
+            return False, f"mux failed: {mux_result.stderr.strip() or mux_result.stdout.strip()}"
+        return True, f"saved video {self.muxed_path}"
+
+    def _generate_transcript(self):
+        whisper_path = shutil.which("whisper")
+        if whisper_path is None:
+            return False, "transcript skipped: whisper CLI not found"
+
+        transcript_cmd = [
+            whisper_path,
+            self.audio_path,
+            "--model", "base",
+            "--task", "transcribe",
+            "--language", "en",
+            "--output_format", "txt",
+            "--output_dir", self.output_dir,
+        ]
+        transcript_result = subprocess.run(transcript_cmd, capture_output=True, text=True)
+        if transcript_result.returncode != 0:
+            return False, f"transcript failed: {transcript_result.stderr.strip() or transcript_result.stdout.strip()}"
+
+        generated_path = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(self.audio_path))[0]}.txt")
+        if os.path.exists(generated_path):
+            if generated_path != self.transcript_path:
+                os.replace(generated_path, self.transcript_path)
+            return True, f"saved transcript {self.transcript_path}"
+        return False, "transcript command completed but no txt file was produced"
+
 def detect_hand_gestures(hand_results, frame_width, frame_height):
     pinch_detected = False
     pinch_start_point = None
     index_tip_point = None
     two_detected = False
     four_detected = False
+    three_detected = False
+    three_and_fist_detected = False
     best_pinch_ratio = 999.0
     fist_count = 0
+    three_count = 0
     thumbs_up_detected = False
     single_fist_detected = False
     two_fists_detected = False
 
     if not hand_results.multi_hand_landmarks:
-        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
+        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, three_and_fist_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
 
     for hand_landmarks in hand_results.multi_hand_landmarks:
         lm = hand_landmarks.landmark
@@ -474,6 +669,17 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if hand_two:
             two_detected = True
 
+        hand_three = (
+            index_extended and
+            middle_extended and
+            ring_extended and
+            not pinky_extended and
+            thumb_not_wide_open and
+            not pinch_detected
+        )
+        if hand_three:
+            three_count += 1
+
         hand_fist = (
             not index_extended and
             not middle_extended and
@@ -508,10 +714,12 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if hand_thumbs_up:
             thumbs_up_detected = True
 
+    three_detected = (three_count >= 1)
+    three_and_fist_detected = (three_count >= 1 and fist_count >= 1)
     single_fist_detected = (fist_count == 1)
     two_fists_detected = (fist_count >= 2)
 
-    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
+    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, three_and_fist_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
 
 
 # ----------------------------------------------------------------------
@@ -879,7 +1087,10 @@ def main():
     fist_counter = 0
     thumbs_up_counter = 0
     two_fists_counter = 0
+    three_counter = 0
+    three_fist_counter = 0
     pinch_point = None
+    av_recorder = AVRecorder(AV_RECORD_DIR)
     # Photo capture is handled as a temporary overlay state so the main loop keeps running.
     photo_countdown_active = False
     photo_countdown_start = None
@@ -904,6 +1115,7 @@ def main():
 
             current_time = time.time()
             frame_height, frame_width = frame.shape[:2]
+            recording_fps = face_track_cam.get(cv2.CAP_PROP_FPS)
 
             # Update camera profile from ADC light mode every loop
             if adc_channels is not None:
@@ -932,11 +1144,30 @@ def main():
             processed_image = face_mesh.process(rgb_frame_cap)
             hand_results = hands.process(rgb_frame_cap)
 
-            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, single_fist_detected, thumbs_up_detected, two_fists_detected = detect_hand_gestures(
+            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, three_and_fist_detected, single_fist_detected, thumbs_up_detected, two_fists_detected = detect_hand_gestures(
                 hand_results,
                 frame_width,
                 frame_height
             )
+
+            if av_recorder.active:
+                av_recorder.write_frame(frame)
+
+            if av_recorder.active and three_and_fist_detected:
+                three_fist_counter += 1
+                if three_fist_counter >= THREE_FIST_ENTER_FRAMES:
+                    av_recorder.stop()
+                    three_fist_counter = 0
+            else:
+                three_fist_counter = 0
+
+            if not av_recorder.active and three_detected:
+                three_counter += 1
+                if three_counter >= THREE_ENTER_FRAMES:
+                    av_recorder.start(frame_width, frame_height, recording_fps)
+                    three_counter = 0
+            else:
+                three_counter = 0
 
             if two_fists_detected:
                 two_fists_counter += 1
@@ -1039,8 +1270,10 @@ def main():
                         ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
                         ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
                         ("Thumbs up -> motors ON | Two fists -> motors OFF", (10, 96), (0, 255, 255), 0.55),
-                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 120), (255, 255, 255), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
+                        ("Three -> AV record | Three + fist -> stop", (10, 120), (0, 255, 255), 0.55),
+                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 144), (255, 255, 255), 0.55),
+                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 168), (255, 255, 255), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 192), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
@@ -1063,6 +1296,7 @@ def main():
                     frame,
                     [
                         (f"light_mode:{current_light_mode}", (10, 24), (255, 255, 255), 0.55),
+                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 48), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
@@ -1241,8 +1475,10 @@ def main():
                         (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 120), (255, 255, 255), 0.55),
                         (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
                         (f"gesture:{gesture_txt}", (10, 168), (255, 255, 255), 0.55),
-                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 192), (255, 255, 255), 0.55),
-                        ("Two -> photo | Thumbs up -> motors ON | Two fists -> motors OFF", (10, 216), (255, 255, 255), 0.55),
+                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 192), (255, 255, 255), 0.55),
+                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 216), (255, 255, 255), 0.55),
+                        ("Two -> photo | Thumbs up -> motors ON | Two fists -> motors OFF", (10, 240), (255, 255, 255), 0.55),
+                        ("Three -> AV record | Three + fist -> stop", (10, 264), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
@@ -1256,6 +1492,12 @@ def main():
             set_motors(0)
         except Exception:
             pass
+
+        try:
+            if av_recorder.active:
+                av_recorder.stop()
+        except Exception as recorder_error:
+            print(f"Recorder cleanup error: {recorder_error}")
 
         hands.close()
         face_mesh.close()
