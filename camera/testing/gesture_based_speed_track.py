@@ -22,7 +22,7 @@
 #     - bgc_set_motors(on_off)   (0=off, 1=on)
 # ==============================================================
 
-import os, sys, time, math, warnings, statistics, ctypes, threading, subprocess, wave, shutil
+import os, sys, time, math, warnings, statistics, ctypes, threading, wave
 import cv2
 import mediapipe as mp
 from collections import deque
@@ -35,6 +35,12 @@ try:
     import pyaudio
 except ImportError:
     pyaudio = None
+
+try:
+    from vosk import Model, KaldiRecognizer
+except ImportError:
+    Model = None
+    KaldiRecognizer = None
 
 # --------- Paths and Filename ----------
 file_name = "gesture_based_speed_track.py"
@@ -55,6 +61,8 @@ PATIENT_PHOTO_DIR = os.path.join(BASE_DIR, "patient_photo")
 os.makedirs(PATIENT_PHOTO_DIR, exist_ok=True)
 AUDIO_RECORD_DIR = os.path.join(BASE_DIR, "audio_recordings")
 os.makedirs(AUDIO_RECORD_DIR, exist_ok=True)
+TRANSCRIPT_DIR = os.path.join(BASE_DIR, "transcript")
+VOSK_MODEL_DIR = os.path.join(TRANSCRIPT_DIR, "vosk_model_heavy")
 
 # --------- Vision / tracker config ----------
 # WIDE_ANGLE_CAM_INDEX = 2  # Original dedicated face-tracking camera.
@@ -190,7 +198,7 @@ THUMBS_UP_HEIGHT_RATIO = 0.25
 THUMBS_UP_CLEARANCE_RATIO = 0.10
 MOTOR_GESTURE_COOLDOWN_SEC = 1.0
 THREE_ENTER_FRAMES = 4
-MIN_AUDIO_RECORDING_DURATION_SEC = 10.0
+MIN_AUDIO_RECORDING_DURATION_SEC = 5.0
 RECORDING_AUDIO_RATE = 44100
 RECORDING_AUDIO_CHANNELS = 1
 
@@ -505,29 +513,44 @@ class AudioSessionRecorder:
         return transcript_ok, self.status_message
 
     def _generate_transcript(self):
-        whisper_path = shutil.which("whisper")
-        if whisper_path is None:
-            return False, "transcript skipped: whisper CLI not found"
+        if Model is None or KaldiRecognizer is None:
+            return False, "transcript skipped: vosk is not installed in the active Python environment"
 
-        transcript_cmd = [
-            whisper_path,
-            self.audio_path,
-            "--model", "base",
-            "--task", "transcribe",
-            "--language", "en",
-            "--output_format", "txt",
-            "--output_dir", self.output_dir,
-        ]
-        transcript_result = subprocess.run(transcript_cmd, capture_output=True, text=True)
-        if transcript_result.returncode != 0:
-            return False, f"transcript failed: {transcript_result.stderr.strip() or transcript_result.stdout.strip()}"
+        if not os.path.isdir(VOSK_MODEL_DIR):
+            return False, f"transcript skipped: Vosk model folder not found at {VOSK_MODEL_DIR}"
 
-        generated_path = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(self.audio_path))[0]}.txt")
-        if os.path.exists(generated_path):
-            if generated_path != self.transcript_path:
-                os.replace(generated_path, self.transcript_path)
-            return True, f"saved transcript {self.transcript_path}"
-        return False, "transcript command completed but no txt file was produced"
+        try:
+            model = Model(VOSK_MODEL_DIR)
+            with wave.open(self.audio_path, "rb") as wav_file:
+                if (
+                    wav_file.getnchannels() != 1 or
+                    wav_file.getsampwidth() != 2 or
+                    wav_file.getcomptype() != "NONE"
+                ):
+                    return False, "transcript skipped: audio file must be mono PCM wav for Vosk"
+
+                recognizer = KaldiRecognizer(model, wav_file.getframerate())
+                recognizer.SetWords(True)
+
+                transcript_parts = []
+                while True:
+                    data = wav_file.readframes(4000)
+                    if len(data) == 0:
+                        break
+                    if recognizer.AcceptWaveform(data):
+                        partial_result = json.loads(recognizer.Result())
+                        transcript_parts.append(partial_result.get("text", ""))
+
+                final_result = json.loads(recognizer.FinalResult())
+                transcript_parts.append(final_result.get("text", ""))
+
+            transcript_text = " ".join(filter(None, transcript_parts)).strip()
+            with open(self.transcript_path, "w", encoding="utf-8") as transcript_file:
+                transcript_file.write(transcript_text)
+        except Exception as transcript_error:
+            return False, f"transcript failed: {transcript_error}"
+
+        return True, f"saved transcript {self.transcript_path}"
 
 def detect_hand_gestures(hand_results, frame_width, frame_height):
     pinch_detected = False
@@ -1222,7 +1245,7 @@ def main():
                         ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
                         ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
                         ("Thumbs up -> motors ON | Two fists -> motors OFF", (10, 96), (0, 255, 255), 0.55),
-                        ("Three -> start audio | 3 again after 10s -> stop", (10, 120), (0, 255, 255), 0.55),
+                        ("Three -> start audio | 3 again after 5s -> stop", (10, 120), (0, 255, 255), 0.55),
                         (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 144), (255, 255, 255), 0.55),
                         (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 168), (255, 255, 255), 0.55),
                         (f"light_mode:{current_light_mode}", (10, 192), (255, 255, 255), 0.55),
@@ -1430,7 +1453,7 @@ def main():
                         (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 192), (255, 255, 255), 0.55),
                         ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 216), (255, 255, 255), 0.55),
                         ("Two -> photo | Thumbs up -> motors ON | Two fists -> motors OFF", (10, 240), (255, 255, 255), 0.55),
-                        ("Three -> start audio | 3 again after 10s -> stop", (10, 264), (255, 255, 255), 0.55),
+                        ("Three -> start audio | 3 again after 5s -> stop", (10, 264), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
