@@ -25,6 +25,7 @@
 import os, sys, time, math, warnings, statistics, ctypes, threading, wave
 import cv2
 import mediapipe as mp
+import numpy as np
 from collections import deque
 import json
 import board
@@ -55,8 +56,6 @@ LIB_PATH = os.path.expanduser(
 )
 
 CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
-# Photos are temporarily captured from the face-tracking camera because the
-# center-camera cable is currently broken.
 PATIENT_PHOTO_DIR = os.path.join(BASE_DIR, "patient_photo")
 os.makedirs(PATIENT_PHOTO_DIR, exist_ok=True)
 AUDIO_RECORD_DIR = os.path.join(BASE_DIR, "audio_recordings")
@@ -65,9 +64,8 @@ TRANSCRIPT_DIR = os.path.join(BASE_DIR, "transcript")
 VOSK_MODEL_DIR = os.path.join(TRANSCRIPT_DIR, "vosk_model_heavy")
 
 # --------- Vision / tracker config ----------
-# WIDE_ANGLE_CAM_INDEX = 2  # Original dedicated face-tracking camera.
-FACE_TRACK_CAM_INDEX = 2  # Temporary single-camera setup.
-# CENTER_CAM_INDEX = 0  # Original photo-sequence camera.
+FACE_TRACK_CAM_INDEX = 2
+CENTER_CAM_INDEX = 0
 FOV_H_DEG = 65.0
 FOV_V_DEG = 48.75
 
@@ -200,6 +198,12 @@ MOTOR_GESTURE_COOLDOWN_SEC = 1.0
 THREE_ENTER_FRAMES = 4
 MIN_AUDIO_RECORDING_DURATION_SEC = 5.0
 MIN_AUDIO_RESTART_DELAY_SEC = 3.0
+QR_WB_STEP = 100.0
+QR_WB_TOLERANCE = 2.0
+QR_WB_DEFAULT_TEMP = 4500.0
+QR_WB_MIN_TEMP = 2000.0
+QR_WB_MAX_TEMP = 10000.0
+QR_WB_APPLY_INTERVAL_SEC = 0.75
 RECORDING_AUDIO_RATE = 44100
 RECORDING_AUDIO_CHANNELS = 1
 
@@ -228,6 +232,18 @@ def ema_scalar(current, previous, alpha):
 
 def clamp(value, min_val, max_val):
     return max(min_val, min(max_val, value))
+
+def get_color_imbalance(roi):
+    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    _, mask = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    white_pixel_count = np.count_nonzero(mask == 255)
+    if white_pixel_count == 0:
+        raise ValueError("QR ROI did not contain detectable white pixels")
+
+    mean_b = np.mean(roi[:, :, 0][mask == 255])
+    mean_r = np.mean(roi[:, :, 2][mask == 255])
+    return mean_b, mean_r
 
 def pixels_to_deg(pixal_change_x, pixal_change_y, frame_width, frame_height, fov_horizontal, fov_verticle):
     half_width, half_height = frame_width / 2.0, frame_height / 2.0
@@ -379,6 +395,58 @@ def update_camera_profile_from_light_mode(camera, current_light_mode, previous_l
         return current_light_mode
 
     return previous_light_mode
+
+def init_camera_white_balance(camera):
+    try:
+        camera.set(cv2.CAP_PROP_AUTO_WB, 0.0)
+    except Exception:
+        pass
+
+    current_temp = camera.get(cv2.CAP_PROP_WB_TEMPERATURE)
+    if current_temp is None or current_temp <= 0 or current_temp == -1:
+        current_temp = QR_WB_DEFAULT_TEMP
+
+    try:
+        camera.set(cv2.CAP_PROP_WB_TEMPERATURE, current_temp)
+    except Exception:
+        pass
+
+    return float(current_temp)
+
+def apply_qr_white_balance(camera, frame, qr_detector, current_temp):
+    qr_found, _decoded_info, points, _ = qr_detector.detectAndDecodeMulti(frame)
+    if not qr_found or points is None or len(points) == 0:
+        return current_temp, False, "QR WB idle"
+
+    pts = points[0].astype(int)
+    x, y, w, h = cv2.boundingRect(pts)
+    frame_height, frame_width = frame.shape[:2]
+    x = max(0, x)
+    y = max(0, y)
+    w = min(w, frame_width - x)
+    h = min(h, frame_height - y)
+    if w <= 0 or h <= 0:
+        return current_temp, True, "QR WB skipped: invalid ROI"
+
+    roi = frame[y:y + h, x:x + w]
+
+    try:
+        mean_b, mean_r = get_color_imbalance(roi)
+    except Exception as qr_error:
+        return current_temp, True, f"QR WB failed: {qr_error}"
+
+    diff = mean_r - mean_b
+    if abs(diff) <= QR_WB_TOLERANCE:
+        return current_temp, True, f"QR WB locked at {current_temp:.0f}K"
+
+    if mean_r > mean_b:
+        current_temp -= QR_WB_STEP
+    else:
+        current_temp += QR_WB_STEP
+
+    current_temp = clamp(current_temp, QR_WB_MIN_TEMP, QR_WB_MAX_TEMP)
+    camera.set(cv2.CAP_PROP_WB_TEMPERATURE, current_temp)
+    return current_temp, True, f"QR WB tuning {current_temp:.0f}K"
 
 def init_adc_channels():
     try:
@@ -946,17 +1014,17 @@ def show_runtime_frame(window_name, frame, overlay_lines):
     cv2.imshow(window_name, frame)
     return (cv2.waitKey(1) & 0xFF) == 27
 
-def capture_patient_photo(face_track_cam):
-    if face_track_cam is None:
-        print("capture_patient_photo: face_track_cam unavailable")
+def capture_patient_photo(center_cam):
+    if center_cam is None:
+        print("capture_patient_photo: center_cam unavailable")
         return False, None
 
-    # Temporary fallback: use the face-tracking camera for the photo sequence
-    # while the dedicated center-camera cable is broken.
-    frame_read, photo_frame = face_track_cam.read()
+    frame_read, photo_frame = center_cam.read()
     if not frame_read:
-        print("capture_patient_photo: failed to read frame from face_track_cam")
+        print("capture_patient_photo: failed to read frame from center_cam")
         return False, None
+
+    photo_frame = cv2.flip(photo_frame, -1)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     milliseconds = int((time.time() % 1.0) * 1000)
@@ -995,12 +1063,16 @@ def main():
         min_detection_confidence=HAND_DETECTION_CONFIDENCE,
         min_tracking_confidence=HAND_TRACKING_CONFIDENCE
     )
+    qr_detector = cv2.QRCodeDetector()
 
-    # Create capture device object and verify it constructed
     face_track_cam = cv2.VideoCapture(FACE_TRACK_CAM_INDEX)
     if not face_track_cam.isOpened():
         print(f'main: Error Unable to open camera from {FACE_TRACK_CAM_INDEX}')
-        # Exit here because we cannot run without camera
+        sys.exit(1)
+
+    center_cam = cv2.VideoCapture(CENTER_CAM_INDEX)
+    if not center_cam.isOpened():
+        print(f'main: Error Unable to open center camera from {CENTER_CAM_INDEX}')
         sys.exit(1)
 
     adc_channels = init_adc_channels()
@@ -1017,6 +1089,10 @@ def main():
 
     # Set the max number of stored frames allowed
     face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
+    center_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
+    current_wb_temp = init_camera_white_balance(face_track_cam)
+    last_qr_wb_apply_time = -999.0
+    qr_wb_status = "QR WB idle"
 
     # Clear test log
     try:
@@ -1124,6 +1200,17 @@ def main():
             processed_image = face_mesh.process(rgb_frame_cap)
             hand_results = hands.process(rgb_frame_cap)
 
+            qr_wb_status = "QR WB idle"
+            if gesture_mode == GESTURE_LOCKED and (current_time - last_qr_wb_apply_time) >= QR_WB_APPLY_INTERVAL_SEC:
+                current_wb_temp, qr_detected_now, qr_wb_status = apply_qr_white_balance(
+                    face_track_cam,
+                    frame,
+                    qr_detector,
+                    current_wb_temp
+                )
+                if qr_detected_now:
+                    last_qr_wb_apply_time = current_time
+
             pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, three_and_fist_detected, single_fist_detected, thumbs_up_detected, two_fists_detected = detect_hand_gestures(
                 hand_results,
                 frame_width,
@@ -1197,7 +1284,7 @@ def main():
                 remaining_photo_time = max(0.0, PHOTO_COUNTDOWN_SEC - elapsed_photo_time)
 
                 if elapsed_photo_time >= PHOTO_COUNTDOWN_SEC:
-                    photo_ok, photo_path = capture_patient_photo(face_track_cam)
+                    photo_ok, photo_path = capture_patient_photo(center_cam)
                     photo_countdown_active = False
                     gesture_mode = photo_return_mode
                     prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
@@ -1209,6 +1296,7 @@ def main():
                         ("gesture:PHOTO_COUNTDOWN", (10, 24), (0, 255, 255), 0.55),
                         (f"Taking photo in {remaining_photo_time:.1f}s", (10, 48), (0, 255, 255), 0.55),
                         (f"light_mode:{current_light_mode}", (10, 72), (255, 255, 255), 0.55),
+                        (qr_wb_status, (10, 96), (255, 255, 255), 0.50),
                     ],
                 ):
                     break
@@ -1265,6 +1353,7 @@ def main():
                         (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 168), (255, 255, 255), 0.55),
                         (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 192), (255, 255, 255), 0.55),
                         (f"light_mode:{current_light_mode}", (10, 216), (255, 255, 255), 0.55),
+                        (qr_wb_status, (10, 240), (255, 255, 255), 0.50),
                     ],
                 ):
                     break
@@ -1288,6 +1377,7 @@ def main():
                     [
                         (f"light_mode:{current_light_mode}", (10, 24), (255, 255, 255), 0.55),
                         (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 48), (255, 255, 255), 0.55),
+                        (qr_wb_status, (10, 72), (255, 255, 255), 0.50),
                     ],
                 ):
                     break
@@ -1471,6 +1561,7 @@ def main():
                         ("Two -> photo | Thumbs up -> motors ON | Two fists -> motors OFF", (10, 240), (255, 255, 255), 0.55),
                         ("Three -> start | 3 again after 5s -> stop", (10, 264), (255, 255, 255), 0.55),
                         ("After stop, wait 3s and release 3 before restart", (10, 288), (255, 255, 255), 0.55),
+                        (qr_wb_status, (10, 312), (255, 255, 255), 0.50),
                     ],
                 ):
                     break
@@ -1494,6 +1585,7 @@ def main():
         hands.close()
         face_mesh.close()
         face_track_cam.release()
+        center_cam.release()
         cv2.destroyAllWindows()
 
         print("Stopped.")
