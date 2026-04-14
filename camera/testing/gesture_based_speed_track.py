@@ -199,6 +199,7 @@ THUMBS_UP_CLEARANCE_RATIO = 0.10
 MOTOR_GESTURE_COOLDOWN_SEC = 1.0
 THREE_ENTER_FRAMES = 4
 MIN_AUDIO_RECORDING_DURATION_SEC = 5.0
+MIN_AUDIO_RESTART_DELAY_SEC = 3.0
 RECORDING_AUDIO_RATE = 44100
 RECORDING_AUDIO_CHANNELS = 1
 
@@ -1067,9 +1068,11 @@ def main():
     thumbs_up_counter = 0
     two_fists_counter = 0
     three_counter = 0
+    three_trigger_armed = True
     pinch_point = None
     av_recorder = AudioSessionRecorder(AUDIO_RECORD_DIR)
     recording_started_at = None
+    last_audio_state_change_time = -999.0
     # Photo capture is handled as a temporary overlay state so the main loop keeps running.
     photo_countdown_active = False
     photo_countdown_start = None
@@ -1129,20 +1132,32 @@ def main():
 
             if three_detected:
                 three_counter += 1
-                if three_counter >= THREE_ENTER_FRAMES:
+                if three_counter >= THREE_ENTER_FRAMES and three_trigger_armed:
                     if not av_recorder.active:
+                        can_restart = (current_time - last_audio_state_change_time) >= MIN_AUDIO_RESTART_DELAY_SEC
+                        if not can_restart:
+                            three_counter = 0
+                            three_trigger_armed = False
+                            continue
+
                         started_ok, _started_message = av_recorder.start()
                         if started_ok:
                             recording_started_at = current_time
+                            last_audio_state_change_time = current_time
+                            three_trigger_armed = False
                     elif (
                         recording_started_at is not None and
-                        (current_time - recording_started_at) >= MIN_AUDIO_RECORDING_DURATION_SEC
+                        (current_time - recording_started_at) >= MIN_AUDIO_RECORDING_DURATION_SEC and
+                        (current_time - last_audio_state_change_time) >= MIN_AUDIO_RECORDING_DURATION_SEC
                     ):
                         av_recorder.stop()
                         recording_started_at = None
+                        last_audio_state_change_time = current_time
+                        three_trigger_armed = False
                     three_counter = 0
             else:
                 three_counter = 0
+                three_trigger_armed = True
 
             if two_fists_detected:
                 two_fists_counter += 1
@@ -1245,10 +1260,11 @@ def main():
                         ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
                         ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
                         ("Thumbs up -> motors ON | Two fists -> motors OFF", (10, 96), (0, 255, 255), 0.55),
-                        ("Three -> start audio | 3 again after 5s -> stop", (10, 120), (0, 255, 255), 0.55),
-                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 144), (255, 255, 255), 0.55),
-                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 168), (255, 255, 255), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 192), (255, 255, 255), 0.55),
+                        ("Three -> start | 3 again after 5s -> stop", (10, 120), (0, 255, 255), 0.55),
+                        ("After stop, wait 3s and release 3 before restart", (10, 144), (0, 255, 255), 0.55),
+                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 168), (255, 255, 255), 0.55),
+                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 192), (255, 255, 255), 0.55),
+                        (f"light_mode:{current_light_mode}", (10, 216), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
@@ -1453,7 +1469,8 @@ def main():
                         (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 192), (255, 255, 255), 0.55),
                         ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 216), (255, 255, 255), 0.55),
                         ("Two -> photo | Thumbs up -> motors ON | Two fists -> motors OFF", (10, 240), (255, 255, 255), 0.55),
-                        ("Three -> start audio | 3 again after 5s -> stop", (10, 264), (255, 255, 255), 0.55),
+                        ("Three -> start | 3 again after 5s -> stop", (10, 264), (255, 255, 255), 0.55),
+                        ("After stop, wait 3s and release 3 before restart", (10, 288), (255, 255, 255), 0.55),
                     ],
                 ):
                     break
