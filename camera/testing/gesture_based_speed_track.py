@@ -148,9 +148,9 @@ STABLE_SCALAR_NEAR = 0.095  # larger box when face is close
 # slightly left/right of the true light center compared with the stronger
 # vertical offset from being mounted above it.
 ANCHOR_X_OFFSET_PX = -10.0
-ANCHOR_Y_OFFSET_FAR_PX = 26.0
-ANCHOR_Y_OFFSET_MID_PX = 46.0
-ANCHOR_Y_OFFSET_NEAR_PX = 66.0
+ANCHOR_Y_OFFSET_FAR_PX = 30.0
+ANCHOR_Y_OFFSET_MID_PX = 50.0
+ANCHOR_Y_OFFSET_NEAR_PX = 70.0
 
 # Prevent flicker: require N consecutive frames to accept a new range
 RANGE_SWITCH_FRAMES = 8
