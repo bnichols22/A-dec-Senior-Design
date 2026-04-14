@@ -26,10 +26,10 @@ def main():
     try:
         while True:
             frame_read, frame = camera.read()
+            frame = cv2.flip(frame, 0)
             if not frame_read:
                 print("Error: failed to read a frame from the center camera")
                 break
-
             cv2.putText(
                 frame,
                 f"Center camera (index {CENTER_CAM_INDEX})",
