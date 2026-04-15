@@ -43,12 +43,19 @@ def main():
 
     print("[STEP] Reading voltages")
     try:
-        print(
-            f"A0: {ch0.voltage:.5f} V | "
-            f"A1: {ch1.voltage:.5f} V | "
-            f"A2: {ch2.voltage:.5f} V | "
-            f"A3: {ch3.voltage:.5f} V"
-        )
+        channels = [
+            ("A0", ch0),
+            ("A1", ch1),
+            ("A2", ch2),
+            ("A3", ch3),
+        ]
+
+        for name, channel in channels:
+            try:
+                print(f"{name}: {channel.voltage:.5f} V")
+            except Exception as channel_error:
+                fail(f"voltage_read_{name}", channel_error)
+
         print("[OK] Voltage read succeeded")
     except Exception as error:
         fail("voltage_read", error)
