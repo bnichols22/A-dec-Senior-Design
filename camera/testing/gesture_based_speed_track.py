@@ -166,14 +166,6 @@ LOWEST_LIGHT_MODE  = "LOWEST_LIGHT"
 MEDIUM_LIGHT_MODE  = "MEDIUM_LIGHT"
 HIGHEST_LIGHT_MODE = "HIGHEST_LIGHT"
 
-FACE_TRACK_LIGHT_MODE_TO_PROFILE = {
-    HIGHEST_LIGHT_MODE: "wide_angle_full_light_on.json",
-    MEDIUM_LIGHT_MODE:  "wide_angle_medium_light_on.json",
-    LOWEST_LIGHT_MODE:  "wide_angle_low_light_on.json",
-    YELLOW_LIGHT_MODE:  "wide_angle_yellow_light_on.json",
-    LIGHT_OFF_MODE:     "wide_angle_light_off.json",
-}
-
 CENTER_CAM_LIGHT_MODE_TO_PROFILE = {
     LIGHT_OFF_MODE: "zoom_loff.json",
     YELLOW_LIGHT_MODE: "zoom_lon.json",
@@ -1086,16 +1078,8 @@ def main():
     adc_channels = init_adc_channels()
 
     current_light_mode = LIGHT_OFF_MODE
-    previous_face_track_light_mode = None
     previous_center_light_mode = None
     if adc_channels is not None:
-        previous_face_track_light_mode = update_camera_profile_from_light_mode(
-            face_track_cam,
-            current_light_mode,
-            previous_face_track_light_mode,
-            CAMERA_PROFILE_DIR,
-            FACE_TRACK_LIGHT_MODE_TO_PROFILE
-        )
         previous_center_light_mode = update_camera_profile_from_light_mode(
             center_cam,
             current_light_mode,
@@ -1200,13 +1184,6 @@ def main():
                 else:
                     current_light_mode = read_mode
                     light_mode_voltages = read_voltages
-                    previous_face_track_light_mode = update_camera_profile_from_light_mode(
-                        face_track_cam,
-                        current_light_mode,
-                        previous_face_track_light_mode,
-                        CAMERA_PROFILE_DIR,
-                        FACE_TRACK_LIGHT_MODE_TO_PROFILE
-                    )
                     previous_center_light_mode = update_camera_profile_from_light_mode(
                         center_cam,
                         current_light_mode,
