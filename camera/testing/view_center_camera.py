@@ -9,10 +9,45 @@ Camera mapping:
 
 import sys
 import cv2
+import json
+import os
 
 
 CENTER_CAM_INDEX = 0
 WINDOW_NAME = "Center Camera Feed"
+BASE_DIR = os.path.expanduser("~/senior_design/A-dec-Senior-Design/camera/testing")
+CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
+STARTUP_PROFILE = "zoom_lon.json"
+
+
+def update_camera_settings(camera, filename, profile_dir):
+    try:
+        profile_path = os.path.join(profile_dir, filename)
+        with open(profile_path, "r", encoding="utf-8") as profile_file:
+            camera_settings = json.load(profile_file)
+
+        if "auto_exposure" in camera_settings:
+            camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, camera_settings["auto_exposure"])
+        if "exposure" in camera_settings:
+            camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
+        if "brightness" in camera_settings:
+            camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])
+        if "contrast" in camera_settings:
+            camera.set(cv2.CAP_PROP_CONTRAST, camera_settings["contrast"])
+        if "gain" in camera_settings:
+            camera.set(cv2.CAP_PROP_GAIN, camera_settings["gain"])
+        if "saturation" in camera_settings:
+            camera.set(cv2.CAP_PROP_SATURATION, camera_settings["saturation"])
+        if "auto_white_balance" in camera_settings:
+            camera.set(cv2.CAP_PROP_AUTO_WB, camera_settings["auto_white_balance"])
+        if "white_balance_temperature" in camera_settings:
+            camera.set(cv2.CAP_PROP_WB_TEMPERATURE, camera_settings["white_balance_temperature"])
+
+        print(f"Loaded center camera profile: {profile_path}")
+        return True
+    except Exception as profile_error:
+        print(f"Warning: failed to load center camera profile {filename}: {profile_error}")
+        return False
 
 
 def main():
@@ -22,6 +57,7 @@ def main():
         sys.exit(1)
 
     camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    update_camera_settings(camera, STARTUP_PROFILE, CAMERA_PROFILE_DIR)
 
     try:
         while True:
