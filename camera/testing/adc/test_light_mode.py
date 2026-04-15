@@ -5,7 +5,7 @@ import busio
 from adafruit_ads1x15 import ADS1115, AnalogIn, ads1x15
 
 # ---------------- Settings ----------------
-OFF_THRESHOLD = 0.8
+OFF_THRESHOLD = 2.0
 
 # ---------------- ADC Setup ----------------
 i2c = busio.I2C(board.SCL, board.SDA)
@@ -26,16 +26,16 @@ def read_light_mode():
     v2 = ch2.voltage
     v3 = ch3.voltage
 
-    if v0 >= OFF_THRESHOLD:
+    if v0 < OFF_THRESHOLD:
         return "YELLOW_LIGHT"
 
-    if v1 >= OFF_THRESHOLD:
+    if v1 < OFF_THRESHOLD:
         return "LOWEST_LIGHT"
 
-    if v2 >= OFF_THRESHOLD:
+    if v2 < OFF_THRESHOLD:
         return "MEDIUM_LIGHT"
 
-    if v3 >= OFF_THRESHOLD:
+    if v3 < OFF_THRESHOLD:
         return "HIGHEST_LIGHT"
 
     return "LIGHT_OFF"

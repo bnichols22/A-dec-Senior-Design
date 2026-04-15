@@ -158,7 +158,7 @@ RANGE_SWITCH_FRAMES = 8
 # ==============================================================
 # NEW: Light mode ADC config
 # ==============================================================
-LIGHT_MODE_THRESHOLD_VOLTS = 0.8
+LIGHT_MODE_THRESHOLD_VOLTS = 2.0
 
 LIGHT_OFF_MODE     = "LIGHT_OFF"
 YELLOW_LIGHT_MODE  = "YELLOW_LIGHT"
@@ -372,12 +372,12 @@ def read_light_mode(adc_channels, off_threshold_volts):
         HIGHEST_LIGHT_MODE: v3,
     }
 
-    active_modes = {mode_name: voltage for mode_name, voltage in voltage_map.items() if voltage >= off_threshold_volts}
+    active_modes = {mode_name: voltage for mode_name, voltage in voltage_map.items() if voltage < off_threshold_volts}
 
     if not active_modes:
         return LIGHT_OFF_MODE, (v0, v1, v2, v3)
 
-    selected_mode = max(active_modes, key=active_modes.get)
+    selected_mode = min(active_modes, key=active_modes.get)
     return selected_mode, (v0, v1, v2, v3)
 
 def update_camera_profile_from_light_mode(camera, current_light_mode, previous_light_mode, profile_dir, profile_map):
