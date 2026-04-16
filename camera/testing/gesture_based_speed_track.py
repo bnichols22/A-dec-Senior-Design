@@ -28,9 +28,10 @@ import mediapipe as mp
 import numpy as np
 from collections import deque
 import json
-import board
-import busio
-from adafruit_ads1x15 import ADS1115, AnalogIn, ads1x15
+# ADC hardware is removed for now, so keep the light-mode ADC imports disabled.
+# import board
+# import busio
+# from adafruit_ads1x15 import ADS1115, AnalogIn, ads1x15
 
 try:
     import pyaudio
@@ -158,6 +159,8 @@ RANGE_SWITCH_FRAMES = 8
 # ==============================================================
 # NEW: Light mode ADC config
 # ==============================================================
+ADC_LIGHT_MODE_ENABLED = False
+PROFILE_SWITCHING_ENABLED = False
 LIGHT_MODE_THRESHOLD_VOLTS = 2.0
 
 LIGHT_OFF_MODE     = "LIGHT_OFF"
@@ -165,6 +168,7 @@ YELLOW_LIGHT_MODE  = "YELLOW_LIGHT"
 LOWEST_LIGHT_MODE  = "LOWEST_LIGHT"
 MEDIUM_LIGHT_MODE  = "MEDIUM_LIGHT"
 HIGHEST_LIGHT_MODE = "HIGHEST_LIGHT"
+DEFAULT_CENTER_LIGHT_MODE = HIGHEST_LIGHT_MODE
 
 CENTER_CAM_LIGHT_MODE_TO_PROFILE = {
     LIGHT_OFF_MODE: "zoom_loff.json",
@@ -449,6 +453,10 @@ def apply_qr_white_balance(camera, frame, qr_detector, current_temp):
     return current_temp, True, f"QR WB tuning {current_temp:.0f}K"
 
 def init_adc_channels():
+    if not ADC_LIGHT_MODE_ENABLED:
+        print("ADC light-mode input disabled; center camera will stay on the default light-on profile.")
+        return None
+
     try:
         i2c = busio.I2C(board.SCL, board.SDA)
         ads = ADS1115(i2c)
@@ -1077,16 +1085,15 @@ def main():
 
     adc_channels = init_adc_channels()
 
-    current_light_mode = LIGHT_OFF_MODE
+    current_light_mode = DEFAULT_CENTER_LIGHT_MODE
     previous_center_light_mode = None
-    if adc_channels is not None:
-        previous_center_light_mode = update_camera_profile_from_light_mode(
-            center_cam,
-            current_light_mode,
-            previous_center_light_mode,
-            CAMERA_PROFILE_DIR,
-            CENTER_CAM_LIGHT_MODE_TO_PROFILE
-        )
+    previous_center_light_mode = update_camera_profile_from_light_mode(
+        center_cam,
+        current_light_mode,
+        previous_center_light_mode,
+        CAMERA_PROFILE_DIR,
+        CENTER_CAM_LIGHT_MODE_TO_PROFILE
+    )
 
     # Set the max number of stored frames allowed
     face_track_cam.set(cv2.CAP_PROP_BUFFERSIZE, MAX_STORED_FRAMES)
@@ -1174,12 +1181,12 @@ def main():
 
             current_time = time.time()
             frame_height, frame_width = frame.shape[:2]
-            # Update camera profile from ADC light mode every loop
-            if adc_channels is not None:
+            # ADC/profile switching is disabled for now; keep center camera on light-on profile.
+            if PROFILE_SWITCHING_ENABLED and adc_channels is not None:
                 read_mode, read_voltages = read_light_mode(adc_channels, LIGHT_MODE_THRESHOLD_VOLTS)
                 if read_mode is None:
                     adc_channels = None
-                    current_light_mode = LIGHT_OFF_MODE
+                    current_light_mode = DEFAULT_CENTER_LIGHT_MODE
                     light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
                 else:
                     current_light_mode = read_mode
@@ -1192,7 +1199,7 @@ def main():
                         CENTER_CAM_LIGHT_MODE_TO_PROFILE
                     )
             else:
-                current_light_mode = LIGHT_OFF_MODE
+                current_light_mode = DEFAULT_CENTER_LIGHT_MODE
                 light_mode_voltages = (0.0, 0.0, 0.0, 0.0)
 
             # Normal tracking mode
