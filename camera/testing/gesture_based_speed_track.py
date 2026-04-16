@@ -1024,6 +1024,13 @@ def show_runtime_frame(window_name, frame, overlay_lines):
     cv2.imshow(window_name, frame)
     return (cv2.waitKey(1) & 0xFF) == 27
 
+def status_overlay(mode_text, motors_enabled, recording_active):
+    return [
+        (mode_text, (10, 24), (0, 255, 255), 0.55),
+        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 48), (255, 255, 255), 0.55),
+        (f"recording:{'ON' if recording_active else 'OFF'}", (10, 72), (255, 255, 255), 0.55),
+    ]
+
 def capture_patient_photo(center_cam):
     if center_cam is None:
         print("capture_patient_photo: center_cam unavailable")
@@ -1311,10 +1318,7 @@ def main():
                     window_name,
                     frame,
                     [
-                        ("gesture:PHOTO_COUNTDOWN", (10, 24), (0, 255, 255), 0.55),
-                        (f"Taking photo in {remaining_photo_time:.1f}s", (10, 48), (0, 255, 255), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 72), (255, 255, 255), 0.55),
-                        (qr_wb_status, (10, 96), (255, 255, 255), 0.50),
+                        (f"photo:{remaining_photo_time:.1f}s", (10, 24), (0, 255, 255), 0.55),
                     ],
                 ):
                     break
@@ -1361,18 +1365,7 @@ def main():
                 if show_runtime_frame(
                     window_name,
                     frame,
-                    [
-                        ("gesture:LOCKED", (10, 24), (0, 255, 255), 0.55),
-                        ("Pinch to track finger | Show 4 to mouth track", (10, 48), (0, 255, 255), 0.55),
-                        ("Show 2 to take patient photo", (10, 72), (0, 255, 255), 0.55),
-                        ("Thumbs up -> motors ON | Two fists -> motors OFF", (10, 96), (0, 255, 255), 0.55),
-                        ("Three -> start | 3 again after 5s -> stop", (10, 120), (0, 255, 255), 0.55),
-                        ("After stop, wait 3s and release 3 before restart", (10, 144), (0, 255, 255), 0.55),
-                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 168), (255, 255, 255), 0.55),
-                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 192), (255, 255, 255), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 216), (255, 255, 255), 0.55),
-                        (qr_wb_status, (10, 240), (255, 255, 255), 0.50),
-                    ],
+                    status_overlay("mode:LOCKED", motors_enabled, av_recorder.active),
                 ):
                     break
                 continue
@@ -1392,11 +1385,7 @@ def main():
                 if show_runtime_frame(
                     window_name,
                     frame,
-                    [
-                        (f"light_mode:{current_light_mode}", (10, 24), (255, 255, 255), 0.55),
-                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 48), (255, 255, 255), 0.55),
-                        (qr_wb_status, (10, 72), (255, 255, 255), 0.50),
-                    ],
+                    status_overlay("mode:NO_TARGET", motors_enabled, av_recorder.active),
                 ):
                     break
                 # Go back to top of while loop
@@ -1555,7 +1544,6 @@ def main():
                 if pinch_point is not None and gesture_mode == GESTURE_TRACK_PINCH:
                     cv2.circle(frame, (int(pinch_point[0]), int(pinch_point[1])), 8, (255, 0, 255), -1)
 
-                eye_str = f"{eye_dist_px:.1f}" if eye_dist_px is not None else "None"
                 state_txt = "LOCKED" if state == LOCKED else "SEEKING"
                 gesture_txt = "MOUTH"
                 if gesture_mode == GESTURE_TRACK_PINCH:
@@ -1566,21 +1554,7 @@ def main():
                 if show_runtime_frame(
                     window_name,
                     frame,
-                    [
-                        (f"state:{state_txt}", (10, 24), (40, 220, 40), 0.55),
-                        (f"Radial distance = {radial_norm:.3f}", (10, 48), (40, 220, 40), 0.55),
-                        (f"eye_px={eye_str} box={current_stable_scalar:.3f} {stable_range}", (10, 72), (40, 220, 40), 0.55),
-                        (f"anchor_offsets=({anchor_x_offset_px:.0f}, {anchor_y_offset_px:.0f})px", (10, 96), (255, 255, 255), 0.55),
-                        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 120), (255, 255, 255), 0.55),
-                        (f"light_mode:{current_light_mode}", (10, 144), (255, 255, 255), 0.55),
-                        (f"gesture:{gesture_txt}", (10, 168), (255, 255, 255), 0.55),
-                        (f"recording:{'ON' if av_recorder.active else 'OFF'}", (10, 192), (255, 255, 255), 0.55),
-                        ("Pinch -> fingertip | Fist -> lock | Four -> mouth", (10, 216), (255, 255, 255), 0.55),
-                        ("Two -> photo | Thumbs up -> motors ON | Two fists -> motors OFF", (10, 240), (255, 255, 255), 0.55),
-                        ("Three -> start | 3 again after 5s -> stop", (10, 264), (255, 255, 255), 0.55),
-                        ("After stop, wait 3s and release 3 before restart", (10, 288), (255, 255, 255), 0.55),
-                        (qr_wb_status, (10, 312), (255, 255, 255), 0.50),
-                    ],
+                    status_overlay(f"mode:{gesture_txt} {state_txt}", motors_enabled, av_recorder.active),
                 ):
                     break
 
