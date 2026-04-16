@@ -37,7 +37,7 @@ def get_color_imbalance(roi):
 
 # NOTE: If hardware settings do not apply on Windows, try forcing DirectShow:
 # cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(2)
 
 # 1. Disable Auto White Balance (0.0 disables, 1.0 enables)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0.0)
