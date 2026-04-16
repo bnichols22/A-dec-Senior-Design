@@ -11,6 +11,7 @@ import sys
 import cv2
 import json
 import os
+import time
 
 
 CENTER_CAM_INDEX = 0
@@ -18,6 +19,8 @@ WINDOW_NAME = "Center Camera Feed"
 BASE_DIR = os.path.expanduser("~/senior_design/A-dec-Senior-Design/camera/testing")
 CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
 STARTUP_PROFILE = "zoom_lon.json"
+POSTER_CAPTURE_DIR = os.path.join(BASE_DIR, "poster_captures")
+os.makedirs(POSTER_CAPTURE_DIR, exist_ok=True)
 
 
 def update_camera_settings(camera, filename, profile_dir):
@@ -50,6 +53,18 @@ def update_camera_settings(camera, filename, profile_dir):
         return False
 
 
+def save_poster_capture(frame):
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    milliseconds = int((time.time() % 1.0) * 1000)
+    capture_path = os.path.join(POSTER_CAPTURE_DIR, f"center_camera_capture_{timestamp}_{milliseconds:03d}.jpg")
+    if cv2.imwrite(capture_path, frame):
+        print(f"Saved center camera capture: {capture_path}")
+        return True
+
+    print(f"Failed to save center camera capture: {capture_path}")
+    return False
+
+
 def main():
     camera = cv2.VideoCapture(CENTER_CAM_INDEX)
     if not camera.isOpened():
@@ -66,6 +81,8 @@ def main():
             if not frame_read:
                 print("Error: failed to read a frame from the center camera")
                 break
+
+            poster_frame = frame.copy()
             cv2.putText(
                 frame,
                 f"Center camera (index {CENTER_CAM_INDEX})",
@@ -79,6 +96,8 @@ def main():
             cv2.imshow(WINDOW_NAME, frame)
 
             key = cv2.waitKey(1) & 0xFF
+            if key == ord("c"):
+                save_poster_capture(poster_frame)
             if key == 27 or key == ord("q"):
                 break
     finally:

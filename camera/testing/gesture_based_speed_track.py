@@ -1327,8 +1327,8 @@ def main():
                     photo_countdown_active = False
                     gesture_mode = photo_return_mode
                     prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 poster_frame = frame.copy()
-                draw_hand_landmarks(poster_frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 if show_runtime_frame(
                     window_name,
                     frame,
@@ -1375,8 +1375,8 @@ def main():
             if gesture_mode == GESTURE_LOCKED:
                 last_send_time = send_zero_if_due(current_time, last_send_time, motors_enabled)
 
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 poster_frame = frame.copy()
-                draw_hand_landmarks(poster_frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 if show_runtime_frame(
                     window_name,
                     frame,
@@ -1397,8 +1397,8 @@ def main():
                     prev_smoothed = None
                     prev_time = None
 
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 poster_frame = frame.copy()
-                draw_hand_landmarks(poster_frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 if show_runtime_frame(
                     window_name,
                     frame,
@@ -1553,6 +1553,14 @@ def main():
             if DRAW_FRAME_RT:
                 l, t_, r, b = map(int, stable_box)
                 cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
+                cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
+                               cv2.MARKER_CROSS, 12, 2)
+                cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
+                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+
+                if pinch_point is not None and gesture_mode == GESTURE_TRACK_PINCH:
+                    cv2.circle(frame, (int(pinch_point[0]), int(pinch_point[1])), 8, (255, 0, 255), -1)
+
                 poster_frame = frame.copy()
 
                 if show_runtime_frame(
