@@ -106,6 +106,8 @@ AXIS_SIGN = {"yaw": 1, "pitch": 1, "roll": 1}
 
 # Capture vars
 MAX_STORED_FRAMES = 1
+CENTER_PHOTO_FLUSH_FRAMES = 8
+CENTER_PHOTO_FLUSH_DELAY_SEC = 0.02
 
 # If this is True, it makes a realtime window on monitor, otherwise it does not
 DRAW_FRAME_RT = True
@@ -1026,6 +1028,13 @@ def capture_patient_photo(center_cam):
     if center_cam is None:
         print("capture_patient_photo: center_cam unavailable")
         return False, None
+
+    # Drain buffered center-camera frames so two-finger capture saves the current view.
+    frame_read = False
+    photo_frame = None
+    for _ in range(CENTER_PHOTO_FLUSH_FRAMES):
+        center_cam.grab()
+        time.sleep(CENTER_PHOTO_FLUSH_DELAY_SEC)
 
     frame_read, photo_frame = center_cam.read()
     if not frame_read:
