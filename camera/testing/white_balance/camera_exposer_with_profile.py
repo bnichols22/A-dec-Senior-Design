@@ -8,12 +8,12 @@ import os
 
 # Default state used if no profile is loaded
 settings = {
-    "exposure": 100,       # Example -2 (bright) -11(dark)
-    "brightness": 0,      # Example -130 (dark) +130(bright)
-    "contrast": 130,      # Example -130 (dark) +130(bright)
+    "exposure": 660.0,       # Example -2 (bright) -11(dark)
+    "brightness": 110,      # Example -130 (dark) +130(bright)
+    "contrast": 20,      # Example -130 (dark) +130(bright)
     "focus": 0,           # Example 0 - 500
     "white_balance": 4600,# min=2800 max=6500 step=1 default=4600
-    "camera_id": 0        # 0 to N
+    "camera_id": 2        # 0 to N
 }
 
 live_feed = True
@@ -53,7 +53,7 @@ def apply_camera_settings(cap, current_settings):
     cap.set(cv2.CAP_PROP_CONTRAST, current_settings["contrast"])
     
     # Disable autofocus to allow manual focus setting
-    #cap.set(cv2.CAP_PROP_AUTOFOCUS, 0) 
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 1) 
     #cap.set(cv2.CAP_PROP_FOCUS, current_settings["focus"])
     
     #cap.set(cv2.CAP_PROP_WB_TEMPERATURE, current_settings["white_balance"])
@@ -63,6 +63,8 @@ def apply_camera_settings(cap, current_settings):
 vid = cv2.VideoCapture(settings["camera_id"])
 if not vid.isOpened():
     raise ValueError('Unable to open video source')
+
+
 
 # Apply the default settings immediately upon open
 apply_camera_settings(vid, settings)
@@ -89,7 +91,9 @@ while(True):
     if live_feed:
         _, frame = vid.read()
         if frame is not None:
+            frame = cv2.flip(frame, 0)
             cv2.imshow('image',frame)
+        frame = cv2.flip(frame, 0)
     else:
         cv2.imshow('image',blank_image)
         frame = None
@@ -145,11 +149,11 @@ while(True):
 
     # EXPOSURE
     if key == ord('w'):
-        settings["exposure"]+=0.5
+        settings["exposure"]+=10
         r=vid.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
         print(f'exposure: {settings["exposure"]}')
     if key == ord('e'):
-        settings["exposure"]-=0.5
+        settings["exposure"]-=10
         print(f'exposure: {settings["exposure"]}')
         r=vid.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
 
