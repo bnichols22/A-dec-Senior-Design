@@ -41,8 +41,12 @@ def update_camera_settings(camera, filename, profile_dir):
             camera.set(cv2.CAP_PROP_GAIN, camera_settings["gain"])
         if "saturation" in camera_settings:
             camera.set(cv2.CAP_PROP_SATURATION, camera_settings["saturation"])
+        if "focus" in camera_settings:
+            camera.set(cv2.CAP_PROP_FOCUS, camera_settings["focus"])
         if "auto_white_balance" in camera_settings:
             camera.set(cv2.CAP_PROP_AUTO_WB, camera_settings["auto_white_balance"])
+        if "white_balance" in camera_settings:
+            camera.set(cv2.CAP_PROP_WB_TEMPERATURE, camera_settings["white_balance"])
         if "white_balance_temperature" in camera_settings:
             camera.set(cv2.CAP_PROP_WB_TEMPERATURE, camera_settings["white_balance_temperature"])
 
