@@ -348,6 +348,8 @@ def update_camera_settings(camera, filename, profile_dir):
         if "auto_exposure" in camera_settings:
             camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, camera_settings["auto_exposure"])
         if "exposure" in camera_settings:
+            if "auto_exposure" not in camera_settings:
+                camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
             camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
         if "brightness" in camera_settings:
             camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])

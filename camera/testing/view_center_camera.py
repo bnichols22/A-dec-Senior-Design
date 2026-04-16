@@ -21,6 +21,7 @@ CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
 STARTUP_PROFILE = "zoom_lon.json"
 POSTER_CAPTURE_DIR = os.path.join(BASE_DIR, "poster_captures")
 os.makedirs(POSTER_CAPTURE_DIR, exist_ok=True)
+MANUAL_EXPOSURE_MODE = 1
 
 
 def update_camera_settings(camera, filename, profile_dir):
@@ -32,6 +33,8 @@ def update_camera_settings(camera, filename, profile_dir):
         if "auto_exposure" in camera_settings:
             camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, camera_settings["auto_exposure"])
         if "exposure" in camera_settings:
+            if "auto_exposure" not in camera_settings:
+                camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, MANUAL_EXPOSURE_MODE)
             camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
         if "brightness" in camera_settings:
             camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])
