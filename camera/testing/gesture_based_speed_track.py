@@ -166,7 +166,6 @@ RANGE_SWITCH_FRAMES = 8
 ADC_LIGHT_MODE_ENABLED = False
 PROFILE_SWITCHING_ENABLED = False
 LIGHT_MODE_THRESHOLD_VOLTS = 2.0
-MANUAL_EXPOSURE_MODE = 1
 
 LIGHT_OFF_MODE     = "LIGHT_OFF"
 YELLOW_LIGHT_MODE  = "YELLOW_LIGHT"
@@ -349,8 +348,6 @@ def update_camera_settings(camera, filename, profile_dir):
         if "auto_exposure" in camera_settings:
             camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, camera_settings["auto_exposure"])
         if "exposure" in camera_settings:
-            if "auto_exposure" not in camera_settings:
-                camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, MANUAL_EXPOSURE_MODE)
             camera.set(cv2.CAP_PROP_EXPOSURE, camera_settings["exposure"])
         if "brightness" in camera_settings:
             camera.set(cv2.CAP_PROP_BRIGHTNESS, camera_settings["brightness"])
@@ -1571,7 +1568,6 @@ def main():
                 cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
                 cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
                                cv2.MARKER_CROSS, 12, 2)
-                cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
                 draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
 
                 if pinch_point is not None and gesture_mode == GESTURE_TRACK_PINCH:
