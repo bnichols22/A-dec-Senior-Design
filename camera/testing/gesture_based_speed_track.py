@@ -59,6 +59,8 @@ LIB_PATH = os.path.expanduser(
 CAMERA_PROFILE_DIR = os.path.join(BASE_DIR, "camera_profiles")
 PATIENT_PHOTO_DIR = os.path.join(BASE_DIR, "patient_photo")
 os.makedirs(PATIENT_PHOTO_DIR, exist_ok=True)
+POSTER_CAPTURE_DIR = os.path.join(BASE_DIR, "poster_captures")
+os.makedirs(POSTER_CAPTURE_DIR, exist_ok=True)
 AUDIO_RECORD_DIR = os.path.join(BASE_DIR, "audio_recordings")
 os.makedirs(AUDIO_RECORD_DIR, exist_ok=True)
 TRANSCRIPT_DIR = os.path.join(BASE_DIR, "transcript")
@@ -1005,7 +1007,18 @@ def draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand
             mp_drawing_styles.get_default_hand_connections_style()
         )
 
-def show_runtime_frame(window_name, frame, overlay_lines):
+def save_poster_capture(frame):
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    milliseconds = int((time.time() % 1.0) * 1000)
+    capture_path = os.path.join(POSTER_CAPTURE_DIR, f"poster_capture_{timestamp}_{milliseconds:03d}.jpg")
+    if cv2.imwrite(capture_path, frame):
+        print(f"Saved poster capture: {capture_path}")
+        return True
+
+    print(f"Failed to save poster capture: {capture_path}")
+    return False
+
+def show_runtime_frame(window_name, frame, overlay_lines, poster_frame=None):
     if not DRAW_FRAME_RT:
         return False
 
@@ -1022,13 +1035,14 @@ def show_runtime_frame(window_name, frame, overlay_lines):
         )
 
     cv2.imshow(window_name, frame)
-    return (cv2.waitKey(1) & 0xFF) == 27
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord("c"):
+        save_poster_capture(poster_frame if poster_frame is not None else frame)
+    return key == 27
 
-def status_overlay(mode_text, motors_enabled, recording_active):
+def status_overlay(recording_active):
     return [
-        (mode_text, (10, 24), (0, 255, 255), 0.55),
-        (f"motors:{'ON' if motors_enabled else 'OFF'}", (10, 48), (255, 255, 255), 0.55),
-        (f"recording:{'ON' if recording_active else 'OFF'}", (10, 72), (255, 255, 255), 0.55),
+        (f"recording:{'ON' if recording_active else 'OFF'}", (10, 24), (255, 255, 255), 0.55),
     ]
 
 def capture_patient_photo(center_cam):
@@ -1313,13 +1327,13 @@ def main():
                     photo_countdown_active = False
                     gesture_mode = photo_return_mode
                     prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
-                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+                poster_frame = frame.copy()
+                draw_hand_landmarks(poster_frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 if show_runtime_frame(
                     window_name,
                     frame,
-                    [
-                        (f"photo:{remaining_photo_time:.1f}s", (10, 24), (0, 255, 255), 0.55),
-                    ],
+                    status_overlay(av_recorder.active),
+                    poster_frame,
                 ):
                     break
                 if photo_countdown_active:
@@ -1361,11 +1375,13 @@ def main():
             if gesture_mode == GESTURE_LOCKED:
                 last_send_time = send_zero_if_due(current_time, last_send_time, motors_enabled)
 
-                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+                poster_frame = frame.copy()
+                draw_hand_landmarks(poster_frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 if show_runtime_frame(
                     window_name,
                     frame,
-                    status_overlay("mode:LOCKED", motors_enabled, av_recorder.active),
+                    status_overlay(av_recorder.active),
+                    poster_frame,
                 ):
                     break
                 continue
@@ -1381,11 +1397,13 @@ def main():
                     prev_smoothed = None
                     prev_time = None
 
-                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
+                poster_frame = frame.copy()
+                draw_hand_landmarks(poster_frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
                 if show_runtime_frame(
                     window_name,
                     frame,
-                    status_overlay("mode:NO_TARGET", motors_enabled, av_recorder.active),
+                    status_overlay(av_recorder.active),
+                    poster_frame,
                 ):
                     break
                 # Go back to top of while loop
@@ -1535,26 +1553,13 @@ def main():
             if DRAW_FRAME_RT:
                 l, t_, r, b = map(int, stable_box)
                 cv2.rectangle(frame, (l, t_), (r, b), (40, 220, 40), 1)
-                cv2.drawMarker(frame, (int(anchor[0]), int(anchor[1])), (0, 200, 0),
-                               cv2.MARKER_CROSS, 12, 2)
-                cv2.circle(frame, (int(smoothed[0]), int(smoothed[1])), 4, (0, 0, 255), -1)
-
-                draw_hand_landmarks(frame, hand_results, mp_drawing, mp_drawing_styles, hand_connections)
-
-                if pinch_point is not None and gesture_mode == GESTURE_TRACK_PINCH:
-                    cv2.circle(frame, (int(pinch_point[0]), int(pinch_point[1])), 8, (255, 0, 255), -1)
-
-                state_txt = "LOCKED" if state == LOCKED else "SEEKING"
-                gesture_txt = "MOUTH"
-                if gesture_mode == GESTURE_TRACK_PINCH:
-                    gesture_txt = "INDEX_TIP"
-                elif gesture_mode == GESTURE_LOCKED:
-                    gesture_txt = "LOCKED"
+                poster_frame = frame.copy()
 
                 if show_runtime_frame(
                     window_name,
                     frame,
-                    status_overlay(f"mode:{gesture_txt} {state_txt}", motors_enabled, av_recorder.active),
+                    status_overlay(av_recorder.active),
+                    poster_frame,
                 ):
                     break
 
