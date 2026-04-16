@@ -197,6 +197,7 @@ PHOTO_COUNTDOWN_SEC = 2.0
 THUMB_TUCK_RATIO = 1.15
 THUMB_OPEN_RATIO = 1.35
 FOUR_THUMB_MAX_RATIO = 1.10
+FOUR_THUMB_CLOSED_RATIO = 0.60
 FIST_CURLED_RATIO = 0.85
 THUMBS_UP_ENTER_FRAMES = 4
 TWO_FISTS_ENTER_FRAMES = 4
@@ -680,6 +681,7 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         pinch_distance = math.hypot(thumb_tip[0] - index_tip[0], thumb_tip[1] - index_tip[1])
         pinch_ratio = pinch_distance / palm_width
         thumb_to_index_mcp = math.hypot(thumb_tip[0] - index_mcp[0], thumb_tip[1] - index_mcp[1])
+        thumb_to_pinky_mcp = math.hypot(thumb_tip[0] - pinky_mcp[0], thumb_tip[1] - pinky_mcp[1])
 
         index_extended = finger_extended(index_tip, index_pip)
         middle_extended = finger_extended(middle_tip, middle_pip)
@@ -699,19 +701,22 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         )
         thumb_not_wide_open = thumb_to_index_mcp < (THUMB_OPEN_RATIO * palm_width)
         thumb_neutral_for_four = thumb_to_index_mcp < (FOUR_THUMB_MAX_RATIO * palm_width)
+        thumb_closed_for_four = (
+            thumb_neutral_for_four and
+            thumb_to_pinky_mcp < (FOUR_THUMB_CLOSED_RATIO * palm_width)
+        )
         index_curled = math.hypot(index_tip[0] - index_mcp[0], index_tip[1] - index_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
         middle_curled = math.hypot(middle_tip[0] - index_mcp[0], middle_tip[1] - index_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
         ring_curled = math.hypot(ring_tip[0] - pinky_mcp[0], ring_tip[1] - pinky_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
         pinky_curled = math.hypot(pinky_tip[0] - pinky_mcp[0], pinky_tip[1] - pinky_mcp[1]) < (FIST_CURLED_RATIO * palm_width)
 
-        # Four fingers extended resumes normal mouth tracking.
-        # The thumb is allowed to be neutral or loosely tucked so this is easier to trigger.
+        # Exactly four fingers resumes mouth tracking; an open five-finger hand should not trigger it.
         hand_four = (
             index_extended and
             middle_extended and
             ring_extended and
             pinky_extended and
-            thumb_neutral_for_four
+            thumb_closed_for_four
         )
         if hand_four:
             four_detected = True
