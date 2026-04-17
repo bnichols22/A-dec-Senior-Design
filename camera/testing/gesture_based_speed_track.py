@@ -63,8 +63,7 @@ POSTER_CAPTURE_DIR = os.path.join(BASE_DIR, "poster_captures")
 os.makedirs(POSTER_CAPTURE_DIR, exist_ok=True)
 AUDIO_RECORD_DIR = os.path.join(BASE_DIR, "audio_recordings")
 os.makedirs(AUDIO_RECORD_DIR, exist_ok=True)
-TRANSCRIPT_DIR = os.path.join(BASE_DIR, "transcript")
-VOSK_MODEL_DIR = os.path.join(TRANSCRIPT_DIR, "vosk_model_heavy")
+VOSK_MODEL_DIR = os.path.join(BASE_DIR, "audio_recordings/vosk_models/vosk-model-small-en-us-0.15")
 
 # --------- Vision / tracker config ----------
 FACE_TRACK_CAM_INDEX = 2
