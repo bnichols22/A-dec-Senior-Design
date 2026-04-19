@@ -56,7 +56,12 @@ def apply_camera_settings(cap, current_settings):
     cap.set(cv2.CAP_PROP_AUTOFOCUS, 1) 
     #cap.set(cv2.CAP_PROP_FOCUS, current_settings["focus"])
     
-    #cap.set(cv2.CAP_PROP_WB_TEMPERATURE, current_settings["white_balance"])
+    # 1. Disable Auto White Balance (0.0 disables, 1.0 enables)
+    cap.set(cv2.CAP_PROP_AUTO_WB, 0.0)
+
+    cap.set(cv2.CAP_PROP_WB_TEMPERATURE, current_settings["white_balance"])
+
+    
 
 
 # --- Main Initialization ---
