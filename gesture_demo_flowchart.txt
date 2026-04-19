@@ -1,0 +1,147 @@
+Gesture-Based Speed Tracking Flowchart
+======================================
+
++-----------------------------+
+| Start Program               |
++-------------+---------------+
+              |
+              v
++-----------------------------+
+| Load settings and libraries |
+| - OpenCV / MediaPipe        |
+| - SimpleBGC motor library   |
++-------------+---------------+
+              |
+              v
++-----------------------------+
+| Open cameras                |
+| - Face tracking camera      |
+| - Center/photo camera       |
++-------------+---------------+
+              |
+              v
++-----------------------------+
+| Enable motors and begin in  |
+| locked/hold state           |
++-------------+---------------+
+              |
+              v
++-----------------------------+
+| Main Loop                   |
++-------------+---------------+
+              |
+              v
++-----------------------------+
+| Read camera frame           |
++-------------+---------------+
+              |
+              v
++-----------------------------+
+| Detect face and hands       |
+| using MediaPipe             |
++-------------+---------------+
+              |
+              v
++-----------------------------+
+| Check hand gestures         |
++-------------+---------------+
+              |
+              v
+     +------------------------------+
+     | Gesture detected?            |
+     +------+-----------+-----------+
+            |           |
+            | No        | Yes
+            v           v
+ +----------------+  +--------------------------------+
+ | Continue       |  | Apply gesture command          |
+ | current mode   |  | - Pinch: fingertip tracking    |
+ +-------+--------+  | - Four fingers: mouth tracking |
+         |           | - Fist: lock position          |
+         |           | - Two fingers: take photo      |
+         |           | - Three fingers: audio record  |
+         |           | - Two fists: motors off        |
+         |           | - Thumbs up: motors on         |
+         |           +---------------+----------------+
+         |                           |
+         +-------------+-------------+
+                       |
+                       v
+          +--------------------------+
+          | Is tracking locked?      |
+          +-----------+--------------+
+                      |
+          +-----------+------------+
+          |                        |
+          | Yes                    | No
+          v                        v
++-------------------+   +-----------------------------+
+| Send zero speed   |   | Select tracking target      |
+| and hold position |   | - Mouth center, or          |
++---------+---------+   | - Index fingertip           |
+          |             +--------------+--------------+
+          |                            |
+          |                            v
+          |              +-----------------------------+
+          |              | Smooth target position      |
+          |              | to reduce jitter            |
+          |              +--------------+--------------+
+          |                            |
+          |                            v
+          |              +-----------------------------+
+          |              | Build dynamic stable box    |
+          |              | based on face distance      |
+          |              +--------------+--------------+
+          |                            |
+          |                            v
+          |              +-----------------------------+
+          |              | Is target inside stable box?|
+          |              +----------+------------------+
+          |                         |
+          |              +----------+-----------+
+          |              |                      |
+          |              | Yes                  | No
+          |              v                      v
+          |    +-------------------+   +-----------------------------+
+          |    | Hold position     |   | Convert pixel error to      |
+          |    | with zero speed   |   | yaw/pitch speed commands    |
+          |    +---------+---------+   +--------------+--------------+
+          |              |                            |
+          |              |                            v
+          |              |              +-----------------------------+
+          |              |              | Clamp and smooth commands   |
+          |              |              +--------------+--------------+
+          |              |                            |
+          |              |                            v
+          |              |              +-----------------------------+
+          |              |              | Send speeds to gimbal       |
+          |              |              | through SimpleBGC           |
+          |              |              +--------------+--------------+
+          |              |                            |
+          +--------------+----------------------------+
+                         |
+                         v
+            +--------------------------+
+            | Display live preview     |
+            | and status overlay       |
+            +------------+-------------+
+                         |
+                         v
+            +--------------------------+
+            | Exit key pressed?        |
+            +------------+-------------+
+                         |
+              +----------+----------+
+              |                     |
+              | No                  | Yes
+              v                     v
+       +-------------+    +---------------------------+
+       | Repeat loop |    | Stop motion, turn motors  |
+       +-------------+    | off, release cameras, and |
+                          | close display             |
+                          +-------------+-------------+
+                                        |
+                                        v
+                                  +-----------+
+                                  | End       |
+                                  +-----------+

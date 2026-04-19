@@ -1,5 +1,22 @@
 import cv2
 import numpy as np
+import os
+import time
+
+BASE_DIR = os.path.expanduser("~/senior_design/A-dec-Senior-Design/camera/testing")
+POSTER_CAPTURE_DIR = os.path.join(BASE_DIR, "poster_captures")
+os.makedirs(POSTER_CAPTURE_DIR, exist_ok=True)
+
+def save_poster_capture(frame):
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    milliseconds = int((time.time() % 1.0) * 1000)
+    capture_path = os.path.join(POSTER_CAPTURE_DIR, f"white_balance_qr_capture_{timestamp}_{milliseconds:03d}.jpg")
+    if cv2.imwrite(capture_path, frame):
+        print(f"Saved white balance QR capture: {capture_path}")
+        return True
+
+    print(f"Failed to save white balance QR capture: {capture_path}")
+    return False
 
 def get_color_imbalance(roi):
     """
@@ -20,7 +37,7 @@ def get_color_imbalance(roi):
 
 # NOTE: If hardware settings do not apply on Windows, try forcing DirectShow:
 # cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(2)
 
 # 1. Disable Auto White Balance (0.0 disables, 1.0 enables)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0.0)
@@ -37,6 +54,7 @@ qr_detector = cv2.QRCodeDetector()
 calibrated = False
 
 print("Press and HOLD 'c' when the QR code is in frame to auto-tune hardware WB.")
+print("Press 'p' to save a poster capture.")
 print("Press 'r' to reset to a default temperature (4500K).")
 print("Press 'q' to quit.")
 
@@ -60,6 +78,13 @@ while True:
             if not calibrated:
                 cv2.putText(display_frame, "QR Detected! Hold 'c' to Tune", (10, 50), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    # Display camera status
+    status_color = (0, 255, 0) if calibrated else (0, 165, 255)
+    cv2.putText(display_frame, f"Hardware Temp: {current_temp}K", 
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+
+    cv2.imshow('Hardware White Balance', display_frame)
 
     # Handle User Input
     key = cv2.waitKey(1) & 0xFF
@@ -110,15 +135,11 @@ while True:
         calibrated = False
         print("Reset to default 4500K.")
 
+    elif key == ord('p'):
+        save_poster_capture(display_frame)
+
     elif key == ord('q'):
         break
-
-    # Display camera status
-    status_color = (0, 255, 0) if calibrated else (0, 165, 255)
-    cv2.putText(display_frame, f"Hardware Temp: {current_temp}K", 
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-
-    cv2.imshow('Hardware White Balance', display_frame)
 
 cap.release()
 cv2.destroyAllWindows()
