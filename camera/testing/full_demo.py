@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================
-# File: speed_control_compliance_dynbox.py
+# File: full_demo.py
 # Purpose:
 #   Smooth face tracker that drives gimbal using SPEED mode (deg/s).
 #
