@@ -12,8 +12,6 @@
 #       - Fist -> lock in place / hold position
 #       - Four fingers -> resume mouth tracking
 #       - Two fingers -> start photo countdown and temporarily capture with face-track camera
-#       - Thumbs up -> re-enable motors
-#       - Two closed fists on screen -> cut motors
 #
 # Motor lib usage:
 #   SimpleBGC SerialAPI shim:
@@ -207,11 +205,6 @@ THUMB_OPEN_RATIO = 1.35
 FOUR_THUMB_MAX_RATIO = 1.10
 FOUR_THUMB_CLOSED_RATIO = 0.60
 FIST_CURLED_RATIO = 0.85
-THUMBS_UP_ENTER_FRAMES = 4
-TWO_FISTS_ENTER_FRAMES = 4
-THUMBS_UP_HEIGHT_RATIO = 0.25
-THUMBS_UP_CLEARANCE_RATIO = 0.10
-MOTOR_GESTURE_COOLDOWN_SEC = 1.0
 THREE_ENTER_FRAMES = 4
 MIN_AUDIO_RECORDING_DURATION_SEC = 5.0
 MIN_AUDIO_RESTART_DELAY_SEC = 3.0
@@ -660,25 +653,19 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
     two_detected = False
     four_detected = False
     three_detected = False
-    three_and_fist_detected = False
     best_pinch_ratio = 999.0
     fist_count = 0
     three_count = 0
-    thumbs_up_detected = False
     single_fist_detected = False
-    two_fists_detected = False
 
     if not hand_results.multi_hand_landmarks:
-        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, three_and_fist_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
+        return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, single_fist_detected
 
     for hand_landmarks in hand_results.multi_hand_landmarks:
         lm = hand_landmarks.landmark
 
-        wrist = landmark_to_pixel(lm[0], frame_width, frame_height)
-
         thumb_tip = landmark_to_pixel(lm[4], frame_width, frame_height)
         thumb_ip = landmark_to_pixel(lm[3], frame_width, frame_height)
-        thumb_mcp = landmark_to_pixel(lm[2], frame_width, frame_height)
 
         index_tip = landmark_to_pixel(lm[8], frame_width, frame_height)
         index_pip = landmark_to_pixel(lm[6], frame_width, frame_height)
@@ -778,32 +765,10 @@ def detect_hand_gestures(hand_results, frame_width, frame_height):
         if hand_fist:
             fist_count += 1
 
-        thumb_extended_up = (
-            thumb_tip[1] < thumb_mcp[1] and
-            thumb_tip[1] < wrist[1]
-        )
-        thumb_above_index_mcp = thumb_tip[1] < (index_mcp[1] - (THUMBS_UP_CLEARANCE_RATIO * palm_width))
-        thumb_height = abs(thumb_tip[1] - thumb_mcp[1])
-        hand_thumbs_up = (
-            thumb_extended_up and
-            thumb_above_index_mcp and
-            thumb_height > (THUMBS_UP_HEIGHT_RATIO * palm_width) and
-            not index_extended and
-            not middle_extended and
-            not ring_extended and
-            not pinky_extended and
-            not hand_fist and
-            not pinch_detected
-        )
-        if hand_thumbs_up:
-            thumbs_up_detected = True
-
     three_detected = (three_count >= 1)
-    three_and_fist_detected = (three_count >= 1 and fist_count >= 1)
     single_fist_detected = (fist_count == 1)
-    two_fists_detected = (fist_count >= 2)
 
-    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, three_and_fist_detected, single_fist_detected, thumbs_up_detected, two_fists_detected
+    return pinch_detected, pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, single_fist_detected
 
 
 # ----------------------------------------------------------------------
@@ -1121,7 +1086,7 @@ def main():
 
     hands = mp_hands.Hands(
         model_complexity=1,
-        max_num_hands=2,
+        max_num_hands=1,
         min_detection_confidence=HAND_DETECTION_CONFIDENCE,
         min_tracking_confidence=HAND_TRACKING_CONFIDENCE
     )
@@ -1204,7 +1169,6 @@ def main():
     pending_count = 0
     stable_scalar = STABLE_SCALAR_DEFAULT
     motors_enabled = bool(set_motors(1))
-    last_motors_off_time = -999.0
 
     # Start gesture control in the locked state, equivalent to beginning with a fist.
     gesture_mode = GESTURE_LOCKED
@@ -1212,8 +1176,6 @@ def main():
     two_counter = 0
     four_counter = 0
     fist_counter = 0
-    thumbs_up_counter = 0
-    two_fists_counter = 0
     three_counter = 0
     three_trigger_armed = True
     pinch_point = None
@@ -1283,7 +1245,7 @@ def main():
                 if qr_detected_now:
                     last_qr_wb_apply_time = current_time
 
-            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, three_and_fist_detected, single_fist_detected, thumbs_up_detected, two_fists_detected = detect_hand_gestures(
+            pinch_detected, _pinch_start_point, index_tip_point, two_detected, four_detected, three_detected, single_fist_detected = detect_hand_gestures(
                 hand_results,
                 frame_width,
                 frame_height
@@ -1317,32 +1279,6 @@ def main():
             else:
                 three_counter = 0
                 three_trigger_armed = True
-
-            if two_fists_detected:
-                two_fists_counter += 1
-                if two_fists_counter >= TWO_FISTS_ENTER_FRAMES and motors_enabled:
-                    send_speeds(0.0, 0.0, 0.0)
-                    motors_enabled = not bool(set_motors(0))
-                    last_motors_off_time = current_time
-                    two_fists_counter = 0
-                    gesture_mode = GESTURE_LOCKED
-                    prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
-            else:
-                two_fists_counter = 0
-
-            if thumbs_up_detected:
-                thumbs_up_counter += 1
-                if (
-                    thumbs_up_counter >= THUMBS_UP_ENTER_FRAMES and
-                    not motors_enabled and
-                    (current_time - last_motors_off_time) >= MOTOR_GESTURE_COOLDOWN_SEC
-                ):
-                    if set_motors(1):
-                        motors_enabled = True
-                        thumbs_up_counter = 0
-                        prev_smoothed, prev_time, consecutive_lost_frames, state = reset_tracking_state(LOCKED)
-            else:
-                thumbs_up_counter = 0
 
             if not two_detected:
                 two_counter = 0
