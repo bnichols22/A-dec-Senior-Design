@@ -2,8 +2,6 @@
 
 ## Introduction
 
-(FYI, This was written with AI but I looked it over to make sure there wasn't anything crazy on here)
-
 Welcome to the world of version control! If you've ever saved multiple versions of a file like `project_final.doc`, `project_final_v2.doc`, and `project_REALLY_FINAL.doc`, you already understand the need for a better system. That's where Git and GitHub Desktop come in.
 
 *   **Git** is a free, open-source **Distributed Version Control System (DVCS)**. It tracks changes to your code over time, allowing you to recall specific versions, see who made changes, and easily collaborate with others.
